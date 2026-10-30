@@ -84,8 +84,7 @@ async function leaderboard(me, asAdmin) {
     const mine = s.email === me;
     return {
       rank, name: asAdmin || mine ? s.name : maskName(s.name), inProgress: s.inProgress, finished: s.finished,
-      readingPts: s.readingPts, donePts: s.donePts, quizPts: s.quizPts, points: s.points,
-      seconds: s.seconds, isMe: mine, ...(asAdmin ? { email: s.email } : {}),
+      quizPts: s.quizPts, points: s.points, seconds: s.seconds, isMe: mine,
     };
   });
 }
@@ -181,6 +180,18 @@ export default async function handler(req, res) {
       await redis('HSET', `progress:${me}`, bookId, JSON.stringify(p));
       if (Math.floor((p.seconds || 0) / 300) !== before) await refreshScore(user);   // leaderboard updates every ~5 min of reading
       return res.json({ seconds: Math.floor(p.seconds || 0) });
+    }
+
+    // Remember the real page the student reached (sent by the in-site PDF reader), so Resume opens there.
+    if (action === 'page') {
+      const bookId = bookIdOf();
+      const p = await getProg(me, bookId);
+      if (!p) return fail(400, 'Open the book first.');
+      const total = Math.floor(Number(body.total)), page = Math.floor(Number(body.page));
+      if (!(total >= 1 && total <= 20000 && page >= 1 && page <= total)) return fail(400, 'Invalid page.');
+      p.page = page; p.totalPages = total; p.lastRead = new Date().toISOString();
+      await redis('HSET', `progress:${me}`, bookId, JSON.stringify(p));
+      return res.json({ progress: p });
     }
 
     // Finish a book = submit the 10 written answers (needs minimum reading time).

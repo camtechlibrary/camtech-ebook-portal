@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import PdfViewer from './PdfViewer.jsx';
 import {
   BookOpen, Search, CheckCircle, Clock, Shield, Grid, List, RefreshCw, Users, Eye,
   LogOut, X, ChevronLeft, Check, Sparkles, HardDrive, BookMarked, AlertCircle,
@@ -119,6 +120,9 @@ export default function App() {
   // ---------- reader + timer ----------
   const [activeBook, setActiveBook] = useState(null);
   const [idlePrompt, setIdlePrompt] = useState(false);
+  const [startPage, setStartPage] = useState(1);
+  const [livePage, setLivePage] = useState({ page: 1, total: 0 });
+  const [pdfFailed, setPdfFailed] = useState(false);
   const confirmRef = useRef(Date.now());
   const [toast, setToast] = useState('');
 
@@ -241,11 +245,21 @@ export default function App() {
 
   // ---------- reading / finishing ----------
   const openBook = async (book) => {
+    const prev = progress[book.id];
     setActiveBook(book); setIdlePrompt(false); confirmRef.current = Date.now();
+    setPdfFailed(false); setStartPage(prev?.page || 1); setLivePage({ page: prev?.page || 1, total: prev?.totalPages || 0 });
+    if (prev?.page > 1) flash(`Continuing from page ${prev.page}`);
     try {
       const d = await api('open', { bookId: book.id, title: book.title });   // +1 view every time
       setViews((v) => ({ ...v, [book.id]: d.views }));
       setProgress((p) => ({ ...p, [book.id]: d.progress }));
+    } catch {}
+  };
+
+  const savePage = async (bookId, page, total) => {
+    try {
+      const d = await api('page', { bookId, page, total });
+      setProgress((p) => ({ ...p, [bookId]: { ...(p[bookId] || {}), ...d.progress } }));
     } catch {}
   };
 
@@ -356,10 +370,12 @@ export default function App() {
   const ReadStatus = ({ p }) => {
     if (!p) return null;
     const secs = p.seconds || 0;
+    const pageLine = p.page && p.totalPages ? <div className="text-[11px] text-slate-400 font-mono">Page {p.page} / {p.totalPages} ({Math.round((p.page / p.totalPages) * 100)}%)</div> : null;
     if (p.isFinished) return <div className="mt-2 text-[11px] text-emerald-400 font-semibold flex items-center gap-1"><CheckCircle className="w-3.5 h-3.5" /> Completed • {fmtTime(secs)} read</div>;
     const ready = secs >= MIN_READ_SECONDS;
     return (
       <div className="mt-2 space-y-1">
+        {pageLine}
         <div className="flex justify-between text-[11px]"><span className="text-slate-400 flex items-center gap-1"><Timer className="w-3 h-3" />{fmtTime(secs)} read</span><span className={ready ? 'text-emerald-400 font-semibold' : 'text-slate-500'}>{ready ? 'Ready to finish' : `${MIN_READ_SECONDS / 60}m to unlock`}</span></div>
         <div className="w-full bg-slate-800 h-1.5 rounded-full overflow-hidden"><div className={`h-full ${ready ? 'bg-emerald-500' : 'bg-amber-500'}`} style={{ width: `${Math.min(100, (secs / MIN_READ_SECONDS) * 100)}%` }} /></div>
       </div>
@@ -570,20 +586,19 @@ export default function App() {
             <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-x-auto shadow-xl">
               <table className="w-full text-left text-xs">
                 <thead className="bg-slate-950 text-slate-400 border-b border-slate-800 uppercase font-mono text-[11px]">
-                  <tr><th className="p-3 w-14">Rank</th><th className="p-3">Student</th>{isAdmin && <th className="p-3">Email</th>}<th className="p-3">Books Progress</th><th className="p-3">Books Finished</th><th className="p-3">Reading Pts</th><th className="p-3">Done Pts</th><th className="p-3">Quiz Pts</th><th className="p-3 text-right">Total Points</th></tr>
+                  <tr><th className="p-3 w-14">Rank</th><th className="p-3">Student</th><th className="p-3">Books Progress</th><th className="p-3">Books Finished</th><th className="p-3">Quiz Pts</th><th className="p-3 text-right">Total Points</th></tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800">
                   {board.map((r) => (
                     <tr key={r.rank} className={r.isMe ? 'bg-amber-500/10' : 'hover:bg-slate-800/50'}>
                       <td className="p-3 font-mono font-bold text-white">#{r.rank}</td>
                       <td className="p-3"><div className="font-bold text-white">{r.name}{r.isMe && <span className="text-amber-400 font-normal"> (you)</span>}</div><div className="mt-1">{timeBadge(r.seconds)}</div></td>
-                      {isAdmin && <td className="p-3 font-mono text-amber-400">{r.email}</td>}
-                      <td className="p-3 font-mono">{r.inProgress}</td><td className="p-3 font-mono text-emerald-400">{r.finished}</td>
-                      <td className="p-3 font-mono">{r.readingPts.toLocaleString()}</td><td className="p-3 font-mono">{r.donePts.toLocaleString()}</td><td className="p-3 font-mono">{r.quizPts.toLocaleString()}</td>
+                                            <td className="p-3 font-mono">{r.inProgress}</td><td className="p-3 font-mono text-emerald-400">{r.finished}</td>
+                      <td className="p-3 font-mono">{r.quizPts.toLocaleString()}</td>
                       <td className="p-3 text-right font-mono font-bold text-amber-400 text-sm">{r.points.toLocaleString()}</td>
                     </tr>
                   ))}
-                  {board.length === 0 && <tr><td colSpan={9} className="p-8 text-center text-slate-500">No rankings yet. Students appear here once they start reading.</td></tr>}
+                  {board.length === 0 && <tr><td colSpan={6} className="p-8 text-center text-slate-500">No rankings yet. Students appear here once they start reading.</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -676,7 +691,7 @@ export default function App() {
                 <div key={id} className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2">
                   <div className="flex justify-between gap-3"><h5 className="font-bold text-white text-sm">{book.title}</h5>
                     <span className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded ${p.isFinished ? 'bg-emerald-500/20 text-emerald-400' : p.quiz?.revoked ? 'bg-rose-500/20 text-rose-400' : 'bg-amber-500/20 text-amber-400'}`}>{p.isFinished ? 'Completed' : p.quiz?.revoked ? 'Rejected' : 'In progress'}</span></div>
-                  <div className="text-[11px] text-slate-400 flex justify-between"><span>Read time {fmtTime(p.seconds)} • opened {p.opens || 0}×</span><span>{p.lastRead ? new Date(p.lastRead).toLocaleDateString() : ''}</span></div>
+                  <div className="text-[11px] text-slate-400 flex justify-between"><span>Read time {fmtTime(p.seconds)}{p.page ? ` • page ${p.page}/${p.totalPages}` : ''} • opened {p.opens || 0}×</span><span>{p.lastRead ? new Date(p.lastRead).toLocaleDateString() : ''}</span></div>
                   {p.quiz?.answers && (
                     <details className="text-xs">
                       <summary className="cursor-pointer text-amber-400 font-semibold">Read the student's 10 answers</summary>
@@ -700,6 +715,7 @@ export default function App() {
               <div className="min-w-0"><h3 className="font-bold text-white text-sm line-clamp-1">{activeBook.title}</h3><p className="text-xs text-slate-400">{activeBook.format}{activeBook.fileSize ? ` • ${activeBook.fileSize}` : ''}</p></div>
             </div>
             <div className="flex items-center gap-3">
+              {activeBook.format === 'PDF' && !pdfFailed && livePage.total > 0 && <div className="hidden sm:block bg-slate-950 px-3 py-1.5 rounded-xl border border-slate-800 text-xs font-mono font-bold text-white">Page {livePage.page} / {livePage.total}</div>}
               <div className="flex items-center gap-2 bg-slate-950 px-3 py-1.5 rounded-xl border border-slate-800 text-xs font-mono font-bold text-amber-400"><Timer className="w-4 h-4" />{fmtTime(progress[activeBook.id]?.seconds)} read</div>
               {!activeFinished && <button onClick={() => requestFinish(activeBook)} className={`px-3 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 ${(progress[activeBook.id]?.seconds || 0) >= MIN_READ_SECONDS ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-slate-800 text-slate-400'}`}>{(progress[activeBook.id]?.seconds || 0) >= MIN_READ_SECONDS ? <CheckCircle className="w-4 h-4" /> : <Lock className="w-4 h-4" />} Finish</button>}
               <button onClick={() => setActiveBook(null)} className="p-2 rounded-lg bg-rose-600/20 text-rose-400 hover:bg-rose-600 hover:text-white"><X className="w-4 h-4" /></button>
@@ -708,8 +724,15 @@ export default function App() {
           {activeBook.format !== 'PDF' ? (
             <div className="flex-1 flex items-center justify-center"><div className="text-center space-y-4"><p className="text-slate-300 text-sm">This file type cannot be previewed in the browser.</p>
               <a href={`https://drive.google.com/uc?export=download&id=${activeBook.driveFileId}`} className="inline-flex px-5 py-3 rounded-xl bg-amber-500 text-slate-950 font-bold text-sm">Download file</a></div></div>
+          ) : pdfFailed ? (
+            <>
+              <div className="px-4 py-2 bg-amber-500/10 border-b border-amber-500/30 text-amber-300 text-xs text-center">Page tracking is not available for this file, so it opens in the basic viewer. Reading time still counts.</div>
+              <iframe title={activeBook.title} src={`https://drive.google.com/file/d/${activeBook.driveFileId}/preview`} className="flex-1 w-full bg-slate-950 border-0" allow="autoplay" />
+            </>
           ) : (
-            <iframe title={activeBook.title} src={`https://drive.google.com/file/d/${activeBook.driveFileId}/preview`} className="flex-1 w-full bg-slate-950 border-0" allow="autoplay" />
+            <PdfViewer key={activeBook.id} url={`https://www.googleapis.com/drive/v3/files/${activeBook.driveFileId}?alt=media&key=${DRIVE_KEY}`}
+              startPage={startPage} onLive={(page, total) => setLivePage({ page, total })}
+              onSave={(page, total) => savePage(activeBook.id, page, total)} onError={() => setPdfFailed(true)} />
           )}
           {idlePrompt && (
             <div className="absolute inset-0 bg-slate-950/85 flex items-center justify-center p-4">
