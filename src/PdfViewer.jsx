@@ -1,23 +1,8 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import * as pdfjsLib from 'pdfjs-dist';
 import { Plus, Minus, RefreshCw } from 'lucide-react';
 
-function loadPdfJs() {
-  return new Promise((resolve, reject) => {
-    if (window.pdfjsLib) return resolve(window.pdfjsLib);
-    const script = document.createElement('script');
-    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
-    script.onload = () => {
-      if (window.pdfjsLib) {
-        window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-        resolve(window.pdfjsLib);
-      } else {
-        reject(new Error('PDF.js failed to load'));
-      }
-    };
-    script.onerror = () => reject(new Error('Failed to load PDF script from CDN'));
-    document.head.appendChild(script);
-  });
-}
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
 export default function PdfViewer({ url, startPage = 1, onLive, onSave, onError }) {
   const wrapRef = useRef(null);
@@ -27,7 +12,6 @@ export default function PdfViewer({ url, startPage = 1, onLive, onSave, onError 
   const [base, setBase] = useState(null);
   const [width, setWidth] = useState(0);
   const [zoom, setZoom] = useState(1);
-  const [current, setCurrent] = useState(startPage);
   const [jump, setJump] = useState(String(startPage));
   const [loading, setLoading] = useState(true);
 
@@ -51,26 +35,18 @@ export default function PdfViewer({ url, startPage = 1, onLive, onSave, onError 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-
-    loadPdfJs().then((pdfjsLib) => {
+    const task = pdfjsLib.getDocument({ url, rangeChunkSize: 1 << 20, disableAutoFetch: true });
+    task.promise.then(async (pdf) => {
+      if (cancelled) { pdf.destroy(); return; }
+      pdfRef.current = pdf;
+      const p1 = await pdf.getPage(1);
+      const vp = p1.getViewport({ scale: 1 });
       if (cancelled) return;
-      const task = pdfjsLib.getDocument({ url, rangeChunkSize: 1 << 20, disableAutoFetch: true });
-      task.promise.then(async (pdf) => {
-        if (cancelled) { pdf.destroy(); return; }
-        pdfRef.current = pdf;
-        const p1 = await pdf.getPage(1);
-        const vp = p1.getViewport({ scale: 1 });
-        if (cancelled) return;
-        setBase({ w: vp.width, h: vp.height });
-        setNumPages(pdf.numPages);
-        setLoading(false);
-      }).catch((e) => { if (!cancelled) cb.current.onError?.(e); });
+      setBase({ w: vp.width, h: vp.height });
+      setNumPages(pdf.numPages);
+      setLoading(false);
     }).catch((e) => { if (!cancelled) cb.current.onError?.(e); });
-
-    return () => {
-      cancelled = true;
-      if (pdfRef.current) { try { pdfRef.current.destroy(); } catch {} pdfRef.current = null; }
-    };
+    return () => { cancelled = true; try { task.destroy(); } catch {} pdfRef.current = null; };
   }, [url]);
 
   useEffect(() => {
@@ -93,7 +69,7 @@ export default function PdfViewer({ url, startPage = 1, onLive, onSave, onError 
     const target = startedRef.current ? currentRef.current : Math.min(Math.max(1, startPage), numPages);
     startedRef.current = true;
     scrollToPage(target);
-    currentRef.current = target; setCurrent(target); setJump(String(target));
+    currentRef.current = target; setJump(String(target));
     if (savedRef.current === 0) savedRef.current = target;
     cb.current.onLive?.(target, numPages);
   }, [numPages, scale]);
@@ -145,7 +121,7 @@ export default function PdfViewer({ url, startPage = 1, onLive, onSave, onError 
     while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (pages[mid].offsetTop <= y) lo = mid; else hi = mid - 1; }
     const n = lo + 1;
     if (n !== currentRef.current) {
-      currentRef.current = n; setCurrent(n); setJump(String(n));
+      currentRef.current = n; setJump(String(n));
       cb.current.onLive?.(n, totalRef.current);
       clearTimeout(timerRef.current);
       timerRef.current = setTimeout(flush, 2500);
