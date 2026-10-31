@@ -1,9 +1,9 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
-import workerUrl from 'pdfjs-dist/build/pdf.worker.min.js?url';
+
 import { Plus, Minus, RefreshCw } from 'lucide-react';
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js`;
 
 // In-site PDF reader: knows the real page number, restores the last page, renders only pages near the screen.
 export default function PdfViewer({ url, startPage = 1, onLive, onSave, onError }) {
