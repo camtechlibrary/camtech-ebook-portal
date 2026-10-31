@@ -3,17 +3,4 @@ import { defineConfig } from 'vite'
 
 export default defineConfig({
   plugins: [react()],
-  build: {
-    target: 'esnext',
-  },
-  esbuild: {
-    supported: {
-      'top-level-await': true,
-    },
-  },
-  optimizeDeps: {
-    esbuildOptions: {
-      target: 'esnext',
-    },
-  },
 })

@@ -1,16 +1,30 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import * as pdfjsLib from 'pdfjs-dist';
 import { Plus, Minus, RefreshCw } from 'lucide-react';
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+function loadPdfJs() {
+  return new Promise((resolve, reject) => {
+    if (window.pdfjsLib) return resolve(window.pdfjsLib);
+    const script = document.createElement('script');
+    script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+    script.onload = () => {
+      if (window.pdfjsLib) {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+        resolve(window.pdfjsLib);
+      } else {
+        reject(new Error('PDF.js failed to load'));
+      }
+    };
+    script.onerror = () => reject(new Error('Failed to load PDF script from CDN'));
+    document.head.appendChild(script);
+  });
+}
 
-// In-site PDF reader: knows the real page number, restores the last page, renders only pages near the screen.
 export default function PdfViewer({ url, startPage = 1, onLive, onSave, onError }) {
   const wrapRef = useRef(null);
   const pagesRef = useRef([]);
   const pdfRef = useRef(null);
   const [numPages, setNumPages] = useState(0);
-  const [base, setBase] = useState(null);           // page 1 size at scale 1
+  const [base, setBase] = useState(null);
   const [width, setWidth] = useState(0);
   const [zoom, setZoom] = useState(1);
   const [current, setCurrent] = useState(startPage);
@@ -34,25 +48,31 @@ export default function PdfViewer({ url, startPage = 1, onLive, onSave, onError 
     }
   };
 
-  // ---- load document ----
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    const task = pdfjsLib.getDocument({ url, rangeChunkSize: 1 << 20, disableAutoFetch: true });
-    task.promise.then(async (pdf) => {
-      if (cancelled) { pdf.destroy(); return; }
-      pdfRef.current = pdf;
-      const p1 = await pdf.getPage(1);
-      const vp = p1.getViewport({ scale: 1 });
+
+    loadPdfJs().then((pdfjsLib) => {
       if (cancelled) return;
-      setBase({ w: vp.width, h: vp.height });
-      setNumPages(pdf.numPages);
-      setLoading(false);
+      const task = pdfjsLib.getDocument({ url, rangeChunkSize: 1 << 20, disableAutoFetch: true });
+      task.promise.then(async (pdf) => {
+        if (cancelled) { pdf.destroy(); return; }
+        pdfRef.current = pdf;
+        const p1 = await pdf.getPage(1);
+        const vp = p1.getViewport({ scale: 1 });
+        if (cancelled) return;
+        setBase({ w: vp.width, h: vp.height });
+        setNumPages(pdf.numPages);
+        setLoading(false);
+      }).catch((e) => { if (!cancelled) cb.current.onError?.(e); });
     }).catch((e) => { if (!cancelled) cb.current.onError?.(e); });
-    return () => { cancelled = true; try { task.destroy(); } catch {} pdfRef.current = null; };
+
+    return () => {
+      cancelled = true;
+      if (pdfRef.current) { try { pdfRef.current.destroy(); } catch {} pdfRef.current = null; }
+    };
   }, [url]);
 
-  // ---- width of the reading area ----
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
@@ -68,7 +88,6 @@ export default function PdfViewer({ url, startPage = 1, onLive, onSave, onError 
     if (el && wrapRef.current) wrapRef.current.scrollTop = el.offsetTop - 8;
   };
 
-  // ---- first scroll to saved page; keep current page when zoom/resize changes ----
   useLayoutEffect(() => {
     if (!numPages || !scale) return;
     const target = startedRef.current ? currentRef.current : Math.min(Math.max(1, startPage), numPages);
@@ -79,14 +98,14 @@ export default function PdfViewer({ url, startPage = 1, onLive, onSave, onError 
     cb.current.onLive?.(target, numPages);
   }, [numPages, scale]);
 
-  // ---- render only pages near the viewport ----
   useEffect(() => {
     if (!numPages || !scale || !pdfRef.current) return;
-    const live = new Map();   // page -> { canvas, task }
+    const live = new Map();
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const render = async (n) => {
       if (live.has(n)) return;
       const holder = pagesRef.current[n - 1];
+      if (!holder) return;
       const canvas = document.createElement('canvas');
       const entry = { canvas, task: null };
       live.set(n, entry);
@@ -100,7 +119,7 @@ export default function PdfViewer({ url, startPage = 1, onLive, onSave, onError 
         entry.task = page.render({ canvasContext: canvas.getContext('2d'), viewport: vp, transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null });
         await entry.task.promise;
         if (live.has(n)) holder.appendChild(canvas);
-      } catch (e) { /* cancelled renders are normal */ }
+      } catch (e) {}
     };
     const drop = (n) => {
       const e = live.get(n);
@@ -118,7 +137,6 @@ export default function PdfViewer({ url, startPage = 1, onLive, onSave, onError 
     return () => { io.disconnect(); for (const n of [...live.keys()]) drop(n); };
   }, [numPages, scale]);
 
-  // ---- which page is on screen (real page number) ----
   const onScroll = () => {
     const wrap = wrapRef.current, pages = pagesRef.current;
     if (!wrap || !pages.length) return;
@@ -130,11 +148,10 @@ export default function PdfViewer({ url, startPage = 1, onLive, onSave, onError 
       currentRef.current = n; setCurrent(n); setJump(String(n));
       cb.current.onLive?.(n, totalRef.current);
       clearTimeout(timerRef.current);
-      timerRef.current = setTimeout(flush, 2500);       // save 2.5 s after the student stops scrolling
+      timerRef.current = setTimeout(flush, 2500);
     }
   };
 
-  // save when leaving / hiding the tab / closing the reader
   useEffect(() => {
     const hide = () => { if (document.hidden) flush(); };
     document.addEventListener('visibilitychange', hide);
