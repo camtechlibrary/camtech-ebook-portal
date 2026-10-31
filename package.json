@@ -11,10 +11,13 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.118.0",
+    "autoprefixer": "^10.6.2",
     "lucide-react": "^1.61.0",
+    "pdfjs-dist": "3.11.174",
+    "postcss": "^8.5.32",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
-    "pdfjs-dist": "3.11.174"
+    "tailwindcss": "^4.3.3"
   },
   "devDependencies": {
     "@types/react": "^19.3.0",
