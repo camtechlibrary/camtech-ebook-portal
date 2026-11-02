@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CamTech E-Book Portal</title>
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <script>
+      // apply the saved theme before the page paints (no flash)
+      try { if (localStorage.getItem('camtech_theme') === 'light') document.documentElement.classList.add('light'); } catch (e) {}
+    </script>
+    <style>
+      /* Dark theme = normal Tailwind slate colours. Light theme = inverted slate scale + darker accent text. */
+      :root {
+        color-scheme: dark;
+        --s50: 248 250 252; --s100: 241 245 249; --s200: 226 232 240; --s300: 203 213 225; --s400: 148 163 184;
+        --s500: 100 116 139; --s600: 71 85 105; --s700: 51 65 85; --s800: 30 41 59; --s900: 15 23 42; --s950: 2 6 23;
+        --amber300: 252 211 77; --amber400: 251 191 36; --emerald400: 52 211 153; --rose400: 251 113 133;
+        --blue300: 147 197 253; --blue400: 96 165 250; --orange400: 251 146 60;
+        --hero-a: 23 37 84; --hero-b: 30 27 75;
+      }
+      :root.light {
+        color-scheme: light;
+        --s50: 2 6 23; --s100: 15 23 42; --s200: 30 41 59; --s300: 51 65 85; --s400: 71 85 105;
+        --s500: 100 116 139; --s600: 148 163 184; --s700: 203 213 225; --s800: 226 232 240; --s900: 255 255 255; --s950: 241 245 249;
+        --amber300: 180 83 9; --amber400: 217 119 6; --emerald400: 5 150 105; --rose400: 225 29 72;
+        --blue300: 29 78 216; --blue400: 37 99 235; --orange400: 234 88 12;
+        --hero-a: 219 234 254; --hero-b: 224 231 255;
+      }
+      .hero-bg { background: linear-gradient(to right, rgb(var(--hero-a)), rgb(var(--s900)), rgb(var(--hero-b))); }
+      .logo-tile { background: #fff; border-radius: 14px; box-shadow: 0 0 0 1px rgb(var(--s700) / 0.7); }
+      body { transition: background-color .2s, color .2s; }
+    </style>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      const c = (n) => `rgb(var(--${n}) / <alpha-value>)`;
+      tailwind.config = {
+        theme: { extend: { colors: {
+          slate: { 50: c('s50'), 100: c('s100'), 200: c('s200'), 300: c('s300'), 400: c('s400'), 500: c('s500'), 600: c('s600'), 700: c('s700'), 800: c('s800'), 900: c('s900'), 950: c('s950') },
+          amber: { 300: c('amber300'), 400: c('amber400') },
+          emerald: { 400: c('emerald400') }, rose: { 400: c('rose400') },
+          blue: { 300: c('blue300'), 400: c('blue400') }, orange: { 400: c('orange400') },
+        } } },
+      };
+    </script>
+  </head>
+  <body class="bg-slate-950 text-slate-100 min-h-screen">
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
