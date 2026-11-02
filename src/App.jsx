@@ -478,7 +478,7 @@ export default function App() {
             <div className="logo-tile w-12 h-12 flex items-center justify-center p-1 shrink-0"><img src="/logo-seal.png" alt="CamTech University" className="w-full h-full object-contain" /></div>
             <div>
               <div className="flex items-center gap-2"><span className="font-extrabold text-xl tracking-wider text-slate-100 font-serif">CamTech</span><span className="text-xs bg-amber-500/20 text-amber-300 font-semibold px-2 py-0.5 rounded-md border border-amber-500/30">e-Book Portal</span></div>
-              <p className="text-xs text-slate-400 hidden sm:block">Cambodia Academy of Digital Technology</p>
+              <p className="text-xs text-slate-400 hidden sm:block">Cambodia University of Technology and Science</p>
             </div>
           </div>
           <nav className="hidden md:flex items-center gap-1 bg-slate-950/60 p-1.5 rounded-xl border border-slate-800/80">
