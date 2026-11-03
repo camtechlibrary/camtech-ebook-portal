@@ -12,7 +12,7 @@ import {
 const FOLDER_ID = import.meta.env?.VITE_GDRIVE_FOLDER_ID || '15UQ5uulCe7lyz3xQiyZp_5fqHgD59Fa1';
 const DRIVE_KEY = import.meta.env?.VITE_GDRIVE_API_KEY || '';
 const ALLOWED_DOMAIN = 'camtech.edu.kh';
-const ADMIN_EMAILS = ['camtech.library@camtech.edu.kh', 'sp6026010074@camtech.edu.kh'];
+const ADMIN_EMAILS = ['camtech.library@camtech.edu.kh', 'sp6026010074@camtech.edu.kh', 'sopheaneary.neuy@camtech.edu.kh'];
 const CATEGORIES = ['All', 'Computer Science', 'AI & Data Science', 'Engineering', 'Business', 'GenEd'];
 const COLORS = ['from-blue-700 to-indigo-900', 'from-emerald-700 to-teal-900', 'from-amber-600 to-red-800',
   'from-purple-700 to-[#1e1b4b]', 'from-[#1e293b] to-cyan-950', 'from-rose-700 to-pink-900'];
