@@ -1,9 +1,12 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import PdfViewer from './PdfViewer.jsx';
+import AdminAnalytics from './AdminAnalytics.jsx';
+import CatalogManager, { BookEditor } from './CatalogManager.jsx';
+import SyncPanel from './SyncPanel.jsx';
 import {
   BookOpen, Search, CheckCircle, Clock, Shield, Grid, List, RefreshCw, Users, Eye,
   LogOut, X, ChevronLeft, Check, Sparkles, HardDrive, BookMarked, AlertCircle,
-  Trophy, Medal, Crown, FileText, Timer, Lock, Sun, Moon, KeyRound, Copy, ImageIcon
+  Trophy, Medal, Crown, FileText, Timer, Lock, Sun, Moon, KeyRound, Copy, ImageIcon, BarChart3, Pencil, Star, GraduationCap
 } from 'lucide-react';
 
 // ==========================================
@@ -12,8 +15,9 @@ import {
 const FOLDER_ID = import.meta.env?.VITE_GDRIVE_FOLDER_ID || '15UQ5uulCe7lyz3xQiyZp_5fqHgD59Fa1';
 const DRIVE_KEY = import.meta.env?.VITE_GDRIVE_API_KEY || '';
 const ALLOWED_DOMAIN = 'camtech.edu.kh';
-const ADMIN_EMAILS = ['camtech.library@camtech.edu.kh', 'sp6026010074@camtech.edu.kh', 'sopheaneary.neuy@camtech.edu.kh'];
-const CATEGORIES = ['All', 'Computer Science', 'AI & Data Science', 'Engineering', 'Business', 'GenEd'];
+const ADMIN_EMAILS = ['camtech.library@camtech.edu.kh', 'sp6026010074@camtech.edu.kh'];
+const DEFAULT_CATS = ['Computer Science', 'AI & Data Science', 'Engineering', 'Business', 'GenEd'];
+const ADMIN_TABS = ['admin', 'analytics', 'manager', 'drive'];
 const COLORS = ['from-blue-700 to-indigo-900', 'from-emerald-700 to-teal-900', 'from-amber-600 to-red-800',
   'from-purple-700 to-[#1e1b4b]', 'from-[#1e293b] to-cyan-950', 'from-rose-700 to-pink-900'];
 const PAGE_SIZE = 48;
@@ -121,7 +125,17 @@ export default function App() {
   const [inspect, setInspect] = useState(null);
 
   // ---------- catalog ----------
-  const [books, setBooks] = useState([]);
+  const [rawBooks, setBooks] = useState([]);                 // straight from Google Drive
+  const [meta, setMeta] = useState({});                       // staff edits (title/author/category/tags/featured/required)
+  const [scanInfo, setScanInfo] = useState({ errors: [], skipped: [], at: 0 });
+  const [syncStamp, setSyncStamp] = useState(0);
+  const [editBook, setEditBook] = useState(null);
+  const [quick, setQuick] = useState('all');                  // all | featured | required
+  const [cohortInput, setCohortInput] = useState('');
+  const [formCohort, setFormCohort] = useState('');
+  const [cohortEdit, setCohortEdit] = useState('');
+  const adminRef = useRef(false);
+  adminRef.current = isAdmin;
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [catalogError, setCatalogError] = useState('');
   const [lastSync, setLastSync] = useState('');
@@ -131,6 +145,20 @@ export default function App() {
   const [selectedFormat, setSelectedFormat] = useState('All');
   const [viewMode, setViewMode] = useState('grid');
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+
+  // Drive books + staff edits = what everyone sees
+  const books = useMemo(() => rawBooks.map((b) => {
+    const m = meta[b.id];
+    const orig = { title: b.title, author: b.author, category: b.category };
+    if (!m) return { ...b, orig, tags: [], featured: false, required: [], edited: false };
+    return { ...b, orig, title: m.title || b.title, author: m.author || b.author, category: m.category || b.category, tags: m.tags || [], featured: !!m.featured, required: m.required || [], edited: true };
+  }), [rawBooks, meta]);
+  const allCats = useMemo(() => {
+    const extra = [...new Set(books.map((b) => b.category))].filter((c) => !DEFAULT_CATS.includes(c)).sort();
+    return [...DEFAULT_CATS, ...extra];
+  }, [books]);
+  const knownCohorts = useMemo(() => [...new Set(books.flatMap((b) => b.required || []))].filter((c) => c !== 'ALL').sort(), [books]);
+  const saveMeta = (id, m) => setMeta((prev) => { const n = { ...prev }; if (m) n[id] = m; else delete n[id]; return n; });
 
   // ---------- reader + timer ----------
   const [activeBook, setActiveBook] = useState(null);
@@ -151,7 +179,7 @@ export default function App() {
 
   const loadInit = useCallback(async () => {
     const d = await api('init');
-    setUser(d.user); setViews(d.views); setProgress(d.progress); setBoard(d.leaderboard);
+    setUser(d.user); setViews(d.views); setProgress(d.progress); setBoard(d.leaderboard); setMeta(d.meta || {});
   }, []);
 
   useEffect(() => {
@@ -164,53 +192,65 @@ export default function App() {
   const loadCatalog = useCallback(async () => {
     setCatalogLoading(true); setCatalogError('');
     if (!DRIVE_KEY) { setCatalogError('Missing VITE_GDRIVE_API_KEY in Vercel environment variables.'); setCatalogLoading(false); return; }
+    const all = [], skipped = [], errors = [];
     try {
-      const all = [];
       const queue = [FOLDER_ID];
       while (queue.length) {
         const folder = queue.shift();
         let pageToken = '';
-        do {
-          const params = new URLSearchParams({
-            q: `'${folder}' in parents and trashed=false`, pageSize: '1000', key: DRIVE_KEY,
-            fields: 'nextPageToken,files(id,name,mimeType,size,thumbnailLink,createdTime)',
-          });
-          if (pageToken) params.set('pageToken', pageToken);
-          const res = await fetch(`https://www.googleapis.com/drive/v3/files?${params}`);
-          const data = await res.json();
-          if (!res.ok) throw new Error(data.error?.message || 'Google Drive request failed');
-          for (const f of data.files || []) {
-            if (f.mimeType === 'application/vnd.google-apps.folder') { queue.push(f.id); continue; }
-            if (f.mimeType.startsWith('application/vnd.google-apps')) continue;
-            const n = f.name.toLowerCase();
-            const isPdf = f.mimeType === 'application/pdf' || n.endsWith('.pdf');
-            const isEpub = f.mimeType === 'application/epub+zip' || n.endsWith('.epub');
-            let category = 'GenEd';
-            if (/\bai\b|data|python|neural|machine|learning/.test(n)) category = 'AI & Data Science';
-            else if (/code|cyber|program|system|software|network|computer/.test(n)) category = 'Computer Science';
-            else if (/math|calculus|physics|5g|engineering|control/.test(n)) category = 'Engineering';
-            else if (/business|finance|law|market|econom|manage/.test(n)) category = 'Business';
-            all.push({
-              id: f.id, driveFileId: f.id,
-              title: f.name.replace(/\.(pdf|epub)$/i, '').replace(/[_.-]+/g, ' ').trim(),
-              author: 'CamTech Academic Press', category, format: isPdf ? 'PDF' : isEpub ? 'EPUB' : 'DOC',
-              fileSize: f.size ? (Number(f.size) / 1048576).toFixed(1) + ' MB' : '',
-              thumbnail: f.thumbnailLink ? f.thumbnailLink.replace(/=s\d+$/, '=s600') : '',
-              coverColor: COLORS[[...f.id].reduce((a, c) => a + c.charCodeAt(0), 0) % COLORS.length],
+        try {
+          do {
+            const params = new URLSearchParams({
+              q: `'${folder}' in parents and trashed=false`, pageSize: '1000', key: DRIVE_KEY,
+              fields: 'nextPageToken,files(id,name,mimeType,size,thumbnailLink,createdTime)',
             });
-          }
-          pageToken = data.nextPageToken || '';
-        } while (pageToken);
+            if (pageToken) params.set('pageToken', pageToken);
+            const res = await fetch(`https://www.googleapis.com/drive/v3/files?${params}`);
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error?.message || `Google Drive request failed (HTTP ${res.status})`);
+            for (const f of data.files || []) {
+              if (f.mimeType === 'application/vnd.google-apps.folder') { queue.push(f.id); continue; }
+              if (f.mimeType.startsWith('application/vnd.google-apps')) continue;
+              const n = f.name.toLowerCase();
+              const isPdf = f.mimeType === 'application/pdf' || n.endsWith('.pdf');
+              const isEpub = f.mimeType === 'application/epub+zip' || n.endsWith('.epub');
+              if (!isPdf && !isEpub) skipped.push({ id: f.id, title: f.name, reason: `Unsupported file type (${(n.match(/\.([a-z0-9]{1,5})$/) || [])[1] || f.mimeType})` });
+              else if (f.size === '0') skipped.push({ id: f.id, title: f.name, reason: 'Empty file (0 bytes)' });
+              let category = 'GenEd';
+              if (/\bai\b|data|python|neural|machine|learning/.test(n)) category = 'AI & Data Science';
+              else if (/code|cyber|program|system|software|network|computer/.test(n)) category = 'Computer Science';
+              else if (/math|calculus|physics|5g|engineering|control/.test(n)) category = 'Engineering';
+              else if (/business|finance|law|market|econom|manage/.test(n)) category = 'Business';
+              all.push({
+                id: f.id, driveFileId: f.id,
+                title: f.name.replace(/\.(pdf|epub)$/i, '').replace(/[_.-]+/g, ' ').trim(),
+                author: 'CamTech Academic Press', category, format: isPdf ? 'PDF' : isEpub ? 'EPUB' : 'DOC',
+                fileSize: f.size ? (Number(f.size) / 1048576).toFixed(1) + ' MB' : '',
+                thumbnail: f.thumbnailLink ? f.thumbnailLink.replace(/=s\d+$/, '=s600') : '',
+                coverColor: COLORS[[...f.id].reduce((a, c) => a + c.charCodeAt(0), 0) % COLORS.length],
+              });
+            }
+            pageToken = data.nextPageToken || '';
+          } while (pageToken);
+        } catch (e) {
+          if (folder === FOLDER_ID) throw e;                       // main folder unreadable: nothing to show
+          errors.push(`Sub-folder ${folder.slice(0, 10)}…: ${e.message}`);   // keep going with the other folders
+        }
       }
       all.sort((a, b) => a.title.localeCompare(b.title));
-      setBooks(all);
+      setBooks(all); setScanInfo({ errors, skipped, at: Date.now() });
       setLastSync(new Date().toLocaleTimeString());
-    } catch (e) { setCatalogError(e.message); }
-    finally { setCatalogLoading(false); }
+      if (adminRef.current) {   // admins record what the scan found (new / removed books, problem files)
+        api('syncReport', { books: all.map((b) => [b.id, b.title]), skipped: skipped.slice(0, 300), errors }).then(() => setSyncStamp(Date.now())).catch(() => {});
+      }
+    } catch (e) {
+      setCatalogError(e.message);
+      if (adminRef.current) api('syncReport', { books: [], skipped: [], errors: [e.message] }).then(() => setSyncStamp(Date.now())).catch(() => {});
+    } finally { setCatalogLoading(false); }
   }, []);
 
   useEffect(() => { if (user) loadCatalog(); }, [user?.email, loadCatalog]);
-  useEffect(() => { setVisibleCount(PAGE_SIZE); }, [searchQuery, selectedCategory, selectedFormat]);
+  useEffect(() => { setVisibleCount(PAGE_SIZE); }, [searchQuery, selectedCategory, selectedFormat, quick]);
 
   const loadAdmin = useCallback(async () => { setAdminData(await api('admin')); }, []);
   useEffect(() => { if (isAdmin && activeTab === 'admin') loadAdmin().catch(() => {}); }, [isAdmin, activeTab, loadAdmin]);
@@ -259,6 +299,7 @@ export default function App() {
       const todo = books.filter((b) => !b.thumbnail && !have.has(b.id) && (b.format === 'PDF' || b.format === 'EPUB'));
       setCovGen({ running: true, done: 0, total: todo.length, failed: 0, current: '' });
       let i = 0, done = 0, failed = 0;
+      const problems = [];
       const worker = async () => {
         while (!covStop.current) {
           const b = todo[i++];
@@ -271,12 +312,16 @@ export default function App() {
             setCovers((c) => ({ ...c, [b.id]: img }));
           } catch (e) {
             failed++;
-            if (e.message === 'NO_COVER') await api('setCover', { bookId: b.id, image: 'none' }).catch(() => {});
+            const msg = String(e?.message || e);
+            const bad = msg.startsWith('BAD_FILE');
+            if (msg === 'NO_COVER' || bad) await api('setCover', { bookId: b.id, image: 'none' }).catch(() => {});
+            if (bad) problems.push({ id: b.id, title: b.title, type: 'parse', reason: msg.replace(/^BAD_FILE:\s*/, '').slice(0, 150) });
           }
           done++; setCovGen((g) => ({ ...g, done, failed }));
         }
       };
       await Promise.all([worker(), worker()]);
+      if (problems.length) { await api('reportIssues', { issues: problems.slice(0, 300) }).catch(() => {}); setSyncStamp(Date.now()); }
     } catch (e) { flash(e.message); }
     setCovGen((g) => ({ ...g, running: false, current: '' }));
   };
@@ -292,7 +337,7 @@ export default function App() {
     }
     setAuthBusy(true);
     try {
-      const d = await api(authTab, { email, password: formPassword, name: formName, adminCode: formAdminCode });
+      const d = await api(authTab, { email, password: formPassword, name: formName, adminCode: formAdminCode, cohort: formCohort });
       localStorage.setItem('camtech_token', d.token);
       await loadInit();
       flash(authTab === 'login' ? 'Welcome back!' : 'Account created. Welcome!');
@@ -352,7 +397,7 @@ export default function App() {
     finally { setQuizBusy(false); }
   };
 
-  const openStudent = async (email) => { try { setInspect(await api('student', { email })); } catch (e) { flash(e.message); } };
+  const openStudent = async (email) => { try { const d = await api('student', { email }); setInspect(d); setCohortEdit(d.student.cohort || ''); } catch (e) { flash(e.message); } };
   const revoke = async (email, book) => {
     if (!window.confirm('Reject these answers? The book becomes unfinished and its done + quiz points are removed.')) return;
     try {
@@ -361,16 +406,38 @@ export default function App() {
     } catch (e) { flash(e.message); }
   };
 
+  const saveMyCohort = async () => {
+    try { const d = await api('setCohort', { cohort: cohortInput }); setUser(d.user); setCohortInput(d.user.cohort || ''); flash('Cohort saved.'); }
+    catch (e) { flash(e.message); }
+  };
+  const saveStudentCohort = async () => {
+    try {
+      const d = await api('setStudentCohort', { email: inspect.student.email, cohort: cohortEdit });
+      setInspect((p) => ({ ...p, student: { ...p.student, cohort: d.cohort } })); setCohortEdit(d.cohort); loadAdmin(); flash('Cohort saved.');
+    } catch (e) { flash(e.message); }
+  };
+  const rateQuiz = async (email, book, v) => {
+    if (v === '') return;
+    try { await api('rateQuiz', { email, bookId: book.id, score: Number(v) }); setInspect(await api('student', { email })); flash('Quiz score saved.'); }
+    catch (e) { flash(e.message); }
+  };
+
   // ---------- derived ----------
+  const myCohort = user?.cohort || '';
+  const isRequiredForMe = (b) => (b.required || []).includes('ALL') || (!!myCohort && (b.required || []).includes(myCohort));
   const filteredBooks = useMemo(() => {
     const words = searchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    const rank = (b) => (b.featured ? 2 : 0) + (isRequiredForMe(b) ? 1 : 0);
     return books.filter((b) => {
-      const t = b.title.toLowerCase();
+      const t = `${b.title} ${b.author} ${(b.tags || []).join(' ')}`.toLowerCase();
       return (!words.length || words.every((w) => t.includes(w) || b.category.toLowerCase().includes(w)))
         && (selectedCategory === 'All' || b.category === selectedCategory)
-        && (selectedFormat === 'All' || b.format === selectedFormat);
-    });
-  }, [books, searchQuery, selectedCategory, selectedFormat]);
+        && (selectedFormat === 'All' || b.format === selectedFormat)
+        && (quick === 'all' || (quick === 'featured' && b.featured) || (quick === 'required' && isRequiredForMe(b)));
+    }).map((b, i) => [b, i]).sort(([a, i], [c, j]) => (rank(c) - rank(a)) || (i - j)).map(([b]) => b);   // pinned first
+  }, [books, searchQuery, selectedCategory, selectedFormat, quick, myCohort]);
+  const featuredCount = books.filter((b) => b.featured).length;
+  const requiredCount = books.filter(isRequiredForMe).length;
   const myRank = board.find((r) => r.isMe);
   useEffect(() => {
     if (!user) return;
@@ -380,7 +447,7 @@ export default function App() {
   }, [filteredBooks, visibleCount, progress, books, user?.email, loadCovers]);
   const adminStudents = useMemo(() => {
     const q = adminQuery.trim().toLowerCase();
-    return (adminData?.students || []).filter((x) => !q || x.name.toLowerCase().includes(q) || x.email.toLowerCase().includes(q));
+    return (adminData?.students || []).filter((x) => !q || x.name.toLowerCase().includes(q) || x.email.toLowerCase().includes(q) || (x.cohort || '').toLowerCase().includes(q));
   }, [adminData, adminQuery]);
   const doResetPassword = async (email) => {
     if (!window.confirm(`Create a new temporary password for ${email}? Their old password will stop working.`)) return;
@@ -428,6 +495,7 @@ export default function App() {
             <input className={inputCls} type="email" required placeholder={`name@${ALLOWED_DOMAIN}`} value={formEmail} onChange={(e) => setFormEmail(e.target.value)} />
             <input className={inputCls} type="password" required placeholder="Password" value={formPassword} onChange={(e) => setFormPassword(e.target.value)} />
             {authTab === 'register' && <input className={inputCls} type="password" required placeholder="Confirm password" value={formConfirmPw} onChange={(e) => setFormConfirmPw(e.target.value)} />}
+            {authTab === 'register' && <input className={inputCls} placeholder="Class / cohort (optional, e.g. CS-Y1)" value={formCohort} onChange={(e) => setFormCohort(e.target.value)} />}
             {needsCode && <input className={inputCls} type="password" required placeholder="Admin setup code" value={formAdminCode} onChange={(e) => setFormAdminCode(e.target.value)} />}
             {authError && <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs flex items-center gap-2"><AlertCircle className="w-4 h-4 shrink-0" /> {authError}</div>}
             <button disabled={authBusy} type="submit" className="w-full py-3 rounded-xl bg-amber-500 hover:bg-amber-400 disabled:opacity-60 text-[#020617] font-bold text-sm transition">
@@ -447,6 +515,20 @@ export default function App() {
       className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all whitespace-nowrap ${activeTab === id ? `${accent} text-white shadow-md` : 'text-slate-400 hover:text-white hover:bg-slate-800/50'}`}>
       <Icon className="w-4 h-4" /> {label}
     </button>
+  );
+  const inAdmin = ADMIN_TABS.includes(activeTab);
+  const adminNavBtn = (label) => (
+    <button key="adm" onClick={() => setActiveTab(inAdmin ? activeTab : 'admin')}
+      className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all whitespace-nowrap ${inAdmin ? 'bg-amber-600 text-white shadow-md shadow-amber-600/30' : 'text-slate-400 hover:text-slate-100 hover:bg-slate-800/50'}`}>
+      <Shield className="w-4 h-4" /> {label}
+    </button>
+  );
+  const AdminNav = () => (
+    <div className="flex flex-wrap gap-2 border-b border-slate-800 pb-4">
+      {[['admin', 'Dashboard', Shield], ['analytics', 'Analytics', BarChart3], ['manager', 'Catalog Manager', Pencil], ['drive', 'Drive Sync', HardDrive]].map(([id, label, Icon]) => (
+        <button key={id} onClick={() => setActiveTab(id)} className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition ${activeTab === id ? 'bg-amber-500 text-[#020617]' : 'bg-slate-900 border border-slate-800 text-slate-300 hover:bg-slate-800'}`}><Icon className="w-4 h-4" />{label}</button>
+      ))}
+    </div>
   );
   const rankIcon = (r) => r === 1 ? <Crown className="w-5 h-5 text-amber-400" /> : r <= 3 ? <Medal className={`w-5 h-5 ${r === 2 ? 'text-slate-300' : 'text-orange-400'}`} /> : <span className="font-mono text-slate-400">{r}</span>;
   const myEntries = Object.entries(progress);
@@ -478,27 +560,26 @@ export default function App() {
             <div className="logo-tile w-12 h-12 flex items-center justify-center p-1 shrink-0"><img src="/logo-seal.png" alt="CamTech University" className="w-full h-full object-contain" /></div>
             <div>
               <div className="flex items-center gap-2"><span className="font-extrabold text-xl tracking-wider text-slate-100 font-serif">CamTech</span><span className="text-xs bg-amber-500/20 text-amber-300 font-semibold px-2 py-0.5 rounded-md border border-amber-500/30">e-Book Portal</span></div>
-              <p className="text-xs text-slate-400 hidden sm:block">Cambodia University of Technology and Science</p>
+              <p className="text-xs text-slate-400 hidden sm:block">Cambodia Academy of Digital Technology</p>
             </div>
           </div>
           <nav className="hidden md:flex items-center gap-1 bg-slate-950/60 p-1.5 rounded-xl border border-slate-800/80">
             {navBtn('catalog', `Catalog (${books.length})`, Grid)}
             {navBtn('bookshelf', 'My Bookshelf', BookMarked)}
             {navBtn('leaderboard', 'Leaderboard', Trophy)}
-            {isAdmin && navBtn('admin', 'Admin Dashboard', Shield, 'bg-amber-600 shadow-amber-600/30')}
-            {isAdmin && navBtn('drive', 'Drive Sync', HardDrive)}
+            {isAdmin && adminNavBtn('Admin')}
           </nav>
           <div className="flex items-center gap-3 bg-slate-800/60 pl-3 pr-1.5 py-1.5 rounded-xl border border-slate-700/60">
             <div className="text-right hidden sm:block"><div className="text-xs font-semibold text-slate-200">{user.name}</div><div className="text-[11px] text-amber-400 font-mono">{user.email}</div></div>
             <span className={`px-2 py-1 rounded-md text-[10px] font-bold uppercase ${isAdmin ? 'bg-amber-500 text-[#020617]' : 'bg-blue-600 text-white'}`}>{user.role}</span>
             <button onClick={toggleTheme} className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-slate-700/50 rounded-lg transition" title={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}>{theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}</button>
-            <button onClick={() => { setPwOpen(true); setPwError(''); }} className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-slate-700/50 rounded-lg transition" title="Change password"><KeyRound className="w-4 h-4" /></button>
+            <button onClick={() => { setPwOpen(true); setPwError(''); setCohortInput(user.cohort || ''); }} className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-slate-700/50 rounded-lg transition" title="Change password"><KeyRound className="w-4 h-4" /></button>
             <button onClick={logout} className="p-1.5 text-slate-400 hover:text-slate-100 hover:bg-slate-700/50 rounded-lg transition" title="Sign out"><LogOut className="w-4 h-4" /></button>
           </div>
         </div>
         <div className="md:hidden flex gap-1 overflow-x-auto px-3 pb-3">
           {navBtn('catalog', 'Catalog', Grid)}{navBtn('bookshelf', 'Bookshelf', BookMarked)}{navBtn('leaderboard', 'Leaderboard', Trophy)}
-          {isAdmin && navBtn('admin', 'Admin', Shield, 'bg-amber-600')}{isAdmin && navBtn('drive', 'Drive', HardDrive)}
+          {isAdmin && adminNavBtn('Admin')}
         </div>
       </header>
 
@@ -528,7 +609,9 @@ export default function App() {
 
             <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-slate-800 pb-5">
               <div className="flex items-center gap-2 overflow-x-auto w-full sm:w-auto pb-2 sm:pb-0">
-                {CATEGORIES.map((cat) => (
+                {featuredCount > 0 && <button onClick={() => setQuick(quick === 'featured' ? 'all' : 'featured')} className={`px-4 py-2 rounded-xl text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 transition-all ${quick === 'featured' ? 'bg-amber-500 text-[#020617]' : 'bg-slate-900 border border-amber-500/40 text-amber-400 hover:bg-slate-800'}`}><Star className="w-3.5 h-3.5" /> Featured ({featuredCount})</button>}
+                {requiredCount > 0 && <button onClick={() => setQuick(quick === 'required' ? 'all' : 'required')} className={`px-4 py-2 rounded-xl text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 transition-all ${quick === 'required' ? 'bg-blue-600 text-white' : 'bg-slate-900 border border-blue-500/40 text-blue-400 hover:bg-slate-800'}`}><GraduationCap className="w-3.5 h-3.5" /> {isAdmin ? 'Required reading' : 'Required for me'} ({requiredCount})</button>}
+                {['All', ...allCats].map((cat) => (
                   <button key={cat} onClick={() => setSelectedCategory(cat)}
                     className={`px-4 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${selectedCategory === cat ? 'bg-amber-500 text-[#020617] shadow-md shadow-amber-500/20' : 'bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-100 hover:bg-slate-800'}`}>{cat}</button>
                 ))}
@@ -555,12 +638,18 @@ export default function App() {
                         <BookCover book={book} cover={covers[book.id]} className="w-full aspect-[3/4] rounded-xl shadow-inner" />
                         <span className={`absolute top-2 left-2 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase backdrop-blur-sm ${book.format === 'PDF' ? 'bg-rose-500/80 text-white' : 'bg-emerald-500/80 text-white'}`}>{book.format}</span>
                         <span className="absolute top-2 right-2 flex items-center gap-1 bg-black/60 backdrop-blur-sm text-white text-[11px] font-mono px-2 py-0.5 rounded-full"><Eye className="w-3 h-3 text-blue-300" />{views[book.id] || 0}</span>
+                        {isAdmin && <button onClick={() => setEditBook(book)} title="Edit book details" className="absolute top-9 right-2 p-1.5 rounded-full bg-black/60 text-white hover:bg-amber-500 hover:text-[#020617] transition"><Pencil className="w-3 h-3" /></button>}
+                        <div className="absolute top-9 left-2 flex flex-col gap-1 items-start max-w-[70%]">
+                          {book.featured && <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500 text-[#020617] flex items-center gap-1"><Star className="w-3 h-3" /> Featured</span>}
+                          {(isAdmin ? (book.required || []).length > 0 : isRequiredForMe(book)) && <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-600 text-white flex items-center gap-1 truncate max-w-full"><GraduationCap className="w-3 h-3 shrink-0" /> {isAdmin ? `Required: ${book.required.join(', ')}` : 'Required'}</span>}
+                        </div>
                         {p?.isFinished && <span className="absolute bottom-2 right-2 bg-emerald-500 text-[#020617] p-1 rounded-full shadow-lg"><CheckCircle className="w-4 h-4" /></span>}
                       </div>
                       <div className="mt-3 flex-1 space-y-1">
                         <h4 className="font-bold text-slate-100 text-sm line-clamp-2 group-hover:text-amber-400 transition-colors">{book.title}</h4>
                         <p className="text-xs text-slate-400 line-clamp-1">{book.author}</p>
                         <p className="text-[11px] text-slate-500">{book.category}{book.fileSize ? ` • ${book.fileSize}` : ''}</p>
+                        {book.tags.length > 0 && <div className="flex flex-wrap gap-1 pt-0.5">{book.tags.slice(0, 3).map((t) => <span key={t} className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px]">{t}</span>)}</div>}
                       </div>
                       <ReadStatus p={p} />
                       <div className="mt-3 flex items-center gap-2">
@@ -586,7 +675,7 @@ export default function App() {
                       const p = progress[book.id];
                       return (
                         <tr key={book.id} className="hover:bg-slate-800/50">
-                          <td className="py-3 px-4"><div className="flex items-center gap-3"><BookCover book={book} cover={covers[book.id]} className="w-9 h-12 rounded shrink-0" /><span className="font-bold text-slate-100">{book.title}</span></div></td>
+                          <td className="py-3 px-4"><div className="flex items-center gap-3"><BookCover book={book} cover={covers[book.id]} className="w-9 h-12 rounded shrink-0" /><span className="font-bold text-slate-100">{book.title}{book.featured && <Star className="inline w-3.5 h-3.5 text-amber-400 ml-1.5 -mt-0.5" />}{(isAdmin ? (book.required || []).length > 0 : isRequiredForMe(book)) && <span className="ml-1.5 px-1.5 py-0.5 rounded bg-blue-600 text-white text-[10px] font-bold align-middle">Required</span>}</span></div></td>
                           <td className="py-3 px-4 text-slate-400">{book.category}</td><td className="py-3 px-4 font-mono">{book.format}</td>
                           <td className="py-3 px-4 font-mono text-blue-300">{views[book.id] || 0}</td>
                           <td className="py-3 px-4 font-mono text-amber-400">{p ? (p.isFinished ? 'Completed' : fmtTime(p.seconds)) : '—'}</td>
@@ -695,6 +784,7 @@ export default function App() {
         {/* ================= ADMIN ================= */}
         {isAdmin && activeTab === 'admin' && (
           <div className="space-y-8">
+            <AdminNav />
             <div className="flex items-center justify-between border-b border-slate-800 pb-5">
               <div><h2 className="text-2xl font-bold text-slate-100 font-serif flex items-center gap-2"><Shield className="w-6 h-6 text-amber-400" /> Admin Control & Student Inspector</h2><p className="text-slate-400 text-sm">Visible to the 2 library admin accounts only.</p></div>
               <button onClick={() => loadAdmin()} className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold flex items-center gap-1.5"><RefreshCw className="w-3.5 h-3.5" /> Refresh</button>
@@ -716,16 +806,16 @@ export default function App() {
               <p className="text-[11px] text-slate-500">Showing {Math.min(adminShow, adminStudents.length)} of {adminStudents.length} student(s){adminQuery ? ' matching your search' : ''}</p>
               <div className="overflow-x-auto">
                 <table className="w-full text-left text-xs">
-                  <thead className="bg-slate-950 text-slate-400 border-b border-slate-800 font-mono text-[11px] uppercase"><tr><th className="p-3">Name</th><th className="p-3">Email</th><th className="p-3">Last login</th><th className="p-3">Read time</th><th className="p-3">In progress</th><th className="p-3">Finished</th><th className="p-3">Points</th><th className="p-3 text-right">Action</th></tr></thead>
+                  <thead className="bg-slate-950 text-slate-400 border-b border-slate-800 font-mono text-[11px] uppercase"><tr><th className="p-3">Name</th><th className="p-3">Email</th><th className="p-3">Cohort</th><th className="p-3">Last login</th><th className="p-3">Read time</th><th className="p-3">In progress</th><th className="p-3">Finished</th><th className="p-3">Points</th><th className="p-3 text-right">Action</th></tr></thead>
                   <tbody className="divide-y divide-slate-800">
                     {adminStudents.slice(0, adminShow).map((s) => (
                       <tr key={s.email} className="hover:bg-slate-800/60">
-                        <td className="p-3 font-bold text-slate-100">{s.name}</td><td className="p-3 font-mono text-amber-400">{s.email}</td>
+                        <td className="p-3 font-bold text-slate-100">{s.name}</td><td className="p-3 font-mono text-amber-400">{s.email}</td><td className="p-3 text-slate-300">{s.cohort || '—'}</td>
                         <td className="p-3 text-slate-400">{s.lastLogin ? timeAgo(new Date(s.lastLogin).getTime()) : 'Never'}</td><td className="p-3 font-mono">{fmtTime(s.seconds)}</td><td className="p-3 font-mono">{s.inProgress}</td><td className="p-3 font-mono text-emerald-400">{s.finished}</td><td className="p-3 font-mono font-bold text-amber-400">{s.points.toLocaleString()}</td>
                         <td className="p-3 text-right"><button onClick={() => openStudent(s.email)} className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-[#020617] font-bold text-xs inline-flex items-center gap-1"><Eye className="w-3.5 h-3.5" /> View</button></td>
                       </tr>
                     ))}
-                    {adminData && adminStudents.length === 0 && <tr><td colSpan={8} className="p-6 text-center text-slate-500">{adminQuery ? 'No student matches your search.' : 'No students registered yet.'}</td></tr>}
+                    {adminData && adminStudents.length === 0 && <tr><td colSpan={9} className="p-6 text-center text-slate-500">{adminQuery ? 'No student matches your search.' : 'No students registered yet.'}</td></tr>}
                   </tbody>
                 </table>
               </div>
@@ -743,8 +833,18 @@ export default function App() {
           </div>
         )}
 
+        {/* ================= ANALYTICS / CATALOG MANAGER (admin) ================= */}
+        {isAdmin && activeTab === 'analytics' && (
+          <div className="space-y-6"><AdminNav /><AdminAnalytics api={api} books={books} flash={flash} /></div>
+        )}
+        {isAdmin && activeTab === 'manager' && (
+          <div className="space-y-6"><AdminNav /><CatalogManager books={books} categories={allCats} cohorts={knownCohorts} api={api} flash={flash} onSaved={saveMeta} /></div>
+        )}
+
         {/* ================= DRIVE SYNC (admin) ================= */}
         {isAdmin && activeTab === 'drive' && (
+          <div className="space-y-6">
+          <AdminNav />
           <div className="max-w-3xl mx-auto bg-slate-900 border border-slate-800 rounded-2xl p-6 sm:p-8 space-y-6 shadow-xl">
             <div className="flex items-center gap-3 border-b border-slate-800 pb-5">
               <div className="p-3 rounded-2xl bg-blue-600/20 border border-blue-500/30 text-blue-400"><HardDrive className="w-6 h-6" /></div>
@@ -775,6 +875,8 @@ export default function App() {
               </div>
             </div>
           </div>
+          <SyncPanel api={api} books={books} driveKey={DRIVE_KEY} scanInfo={scanInfo} syncStamp={syncStamp} flash={flash} />
+          </div>
         )}
       </main>
 
@@ -788,6 +890,12 @@ export default function App() {
               {[['Registered', inspect.student.registeredAt || '—'], ['Last login', inspect.student.lastLogin ? new Date(inspect.student.lastLogin).toLocaleString() : 'Never'], ['Logins', inspect.student.loginCount || 0], ['Password', 'Hidden (secure)']].map(([l, v]) => (
                 <div key={l} className="bg-slate-950 p-3 rounded-xl border border-slate-800"><div className="text-slate-400 text-[10px] uppercase font-bold">{l}</div><div className="text-slate-100 font-semibold mt-0.5 break-words">{v}</div></div>
               ))}
+            </div>
+            <div className="flex items-center gap-2 flex-wrap bg-slate-950 p-3 rounded-xl border border-slate-800">
+              <span className="text-xs font-semibold text-slate-300 flex items-center gap-1.5"><GraduationCap className="w-4 h-4 text-blue-400" /> Cohort</span>
+              <input value={cohortEdit} onChange={(e) => setCohortEdit(e.target.value)} list="cohort-list" placeholder="e.g. CS-Y1" className="px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-slate-100 placeholder-slate-500 text-xs w-36 focus:outline-none focus:ring-2 focus:ring-amber-500" />
+              <datalist id="cohort-list">{knownCohorts.map((c) => <option key={c} value={c} />)}</datalist>
+              <button onClick={saveStudentCohort} className="px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-[#020617] font-bold text-xs">Save</button>
             </div>
             <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2">
               <div className="flex items-center justify-between gap-3 flex-wrap">
@@ -829,6 +937,12 @@ export default function App() {
                       <div className="mt-2 space-y-2">{p.quiz.answers.map((a, i) => <div key={i}><div className="text-slate-500 text-[11px]">{i + 1}. {QUESTIONS[i]}</div><div className="text-slate-200 whitespace-pre-wrap">{a}</div></div>)}</div>
                     </details>
                   )}
+                  {p.isFinished && p.quiz && !p.quiz.revoked && (
+                    <div className="flex items-center gap-2 text-xs"><span className="text-slate-400">Quiz score (0–10):</span>
+                      <select value={typeof p.quiz.score === 'number' ? p.quiz.score : ''} onChange={(e) => rateQuiz(inspect.student.email, book, e.target.value)} className="px-2 py-1 bg-slate-900 border border-slate-800 rounded-lg text-slate-200 text-xs">
+                        <option value="" disabled>Not rated</option>{Array.from({ length: 11 }, (_, n) => <option key={n} value={n}>{n}</option>)}</select>
+                      {typeof p.quiz.score === 'number' && <span className="text-emerald-400 font-mono font-bold">{p.quiz.score}/10</span>}</div>
+                  )}
                   {p.isFinished && <button onClick={() => revoke(inspect.student.email, book)} className="px-3 py-1.5 rounded-lg bg-rose-600/20 text-rose-400 hover:bg-rose-600 hover:text-white text-xs font-bold">Reject answers (remove points)</button>}
                 </div>
               );
@@ -837,13 +951,26 @@ export default function App() {
         </div>
       )}
 
+      {isAdmin && editBook && <BookEditor book={editBook} categories={allCats} cohorts={knownCohorts} api={api} onClose={() => setEditBook(null)} onSaved={(id, m) => { saveMeta(id, m); flash('Book details saved.'); }} />}
+
       {/* CHANGE PASSWORD (forced after an admin reset) */}
       {(pwOpen || mustChange) && (
         <div className="fixed inset-0 z-[60] bg-slate-950/90 backdrop-blur-sm flex items-center justify-center p-4">
           <form onSubmit={submitPw} className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-8 max-w-sm w-full space-y-4 shadow-2xl relative">
             {!mustChange && <button type="button" onClick={() => setPwOpen(false)} className="absolute top-5 right-5 text-slate-400 hover:text-slate-100"><X className="w-5 h-5" /></button>}
-            <div><h3 className="text-lg font-bold text-slate-100 font-serif flex items-center gap-2"><KeyRound className="w-5 h-5 text-amber-400" /> {mustChange ? 'Choose a new password' : 'Change password'}</h3>
+            <div><h3 className="text-lg font-bold text-slate-100 font-serif flex items-center gap-2"><KeyRound className="w-5 h-5 text-amber-400" /> {mustChange ? 'Choose a new password' : 'Account settings'}</h3>
               {mustChange && <p className="text-xs text-slate-400 mt-1">You signed in with a temporary password. Please choose your own.</p>}</div>
+            {!mustChange && (
+              <div className="space-y-2 pb-3 border-b border-slate-800">
+                <label className="text-xs font-semibold text-slate-300 flex items-center gap-1.5"><GraduationCap className="w-4 h-4 text-blue-400" /> Class / cohort <span className="font-normal text-slate-500">(shows your required reading)</span></label>
+                <div className="flex gap-2">
+                  <input value={cohortInput} onChange={(e) => setCohortInput(e.target.value)} list="my-cohorts" placeholder="e.g. CS-Y1" className="flex-1 px-4 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
+                  <datalist id="my-cohorts">{knownCohorts.map((c) => <option key={c} value={c} />)}</datalist>
+                  <button type="button" onClick={saveMyCohort} className="px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-bold">Save</button>
+                </div>
+                <div className="text-xs font-semibold text-slate-300 pt-2">Change password</div>
+              </div>
+            )}
             {!mustChange && <input type="password" required placeholder="Current password" value={pwCurrent} onChange={(e) => setPwCurrent(e.target.value)} className="w-full px-4 py-3 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />}
             <input type="password" required placeholder="New password (6+ characters)" value={pwNew} onChange={(e) => setPwNew(e.target.value)} className="w-full px-4 py-3 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />
             <input type="password" required placeholder="Confirm new password" value={pwNew2} onChange={(e) => setPwNew2(e.target.value)} className="w-full px-4 py-3 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" />

@@ -47,7 +47,7 @@ function readToken(req) {
 }
 const hashPw = (pw, salt) => crypto.scryptSync(pw, salt, 32).toString('hex');
 const isAdminEmail = (e) => ADMINS.includes(e);
-const publicUser = (u) => ({ name: u.name, email: u.email, role: isAdminEmail(u.email) ? 'admin' : 'student', registeredAt: u.registeredAt, mustChange: !!u.mustChange });
+const publicUser = (u) => ({ name: u.name, email: u.email, role: isAdminEmail(u.email) ? 'admin' : 'student', registeredAt: u.registeredAt, mustChange: !!u.mustChange, cohort: u.cohort || '' });
 
 // ---------- Scoring ----------
 // per book: reading (<=100) + done (1000) + quiz (1000). Re-reading never adds more.
@@ -92,6 +92,25 @@ async function leaderboard(me, asAdmin) {
 const log = (email, action, bookTitle) =>
   redis('LPUSH', 'logs', JSON.stringify({ email, action, bookTitle, ts: Date.now() })).then(() => redis('LTRIM', 'logs', 0, 199));
 
+// ---------- Analytics counters (Redis hashes st:*, daily, active:<day> sets) ----------
+const localDay = (t = Date.now()) => new Date(t + 7 * 3600 * 1000).toISOString().slice(0, 10);   // Phnom Penh day (UTC+7)
+const ST = ['readers', 'finished', 'seconds', 'fsec', 'subm', 'rej', 'qsum', 'qcount'];
+const stInc = (field, bookId, n) => (n ? redis('HINCRBY', `st:${field}`, bookId, n) : Promise.resolve());
+async function touchActive(email) {
+  const key = `active:${localDay()}`;
+  if ((await redis('SADD', key, email)) === 1) await redis('EXPIRE', key, 60 * 60 * 24 * 100);
+}
+async function pipeline(cmds) {
+  if (!cmds.length) return [];
+  const res = await fetch(`${REDIS_URL}/pipeline`, { method: 'POST', headers: { Authorization: `Bearer ${REDIS_TOKEN}` }, body: JSON.stringify(cmds) });
+  const j = await res.json();
+  if (!Array.isArray(j)) throw new Error('Redis pipeline failed');
+  return j.map((x) => { if (x.error) throw new Error(x.error); return x.result; });
+}
+const cleanCohort = (x) => String(x || '').trim().toUpperCase().replace(/\s+/g, '-').slice(0, 30);
+const str = (x, n) => String(x == null ? '' : x).trim().slice(0, n);
+const evt = (type, bookId, title, detail) => JSON.stringify({ ts: Date.now(), type, bookId, title, detail });
+
 // ---------- Answer checks (language independent) ----------
 const norm = (t) => t.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
 const grams = (t) => { const s = norm(t), g = new Set(); for (let i = 0; i <= s.length - 4; i++) g.add(s.slice(i, i + 4)); return g; };
@@ -117,7 +136,7 @@ export default async function handler(req, res) {
         return fail(403, 'This is an admin email. Enter the correct admin setup code.');
       if (await redis('HGET', 'users', email)) return fail(409, 'Account already exists. Please sign in.');
       const salt = crypto.randomBytes(16).toString('hex');
-      const user = { name, email, salt, hash: hashPw(pw, salt), registeredAt: new Date().toISOString().slice(0, 10) };
+      const user = { name, email, salt, hash: hashPw(pw, salt), registeredAt: new Date().toISOString().slice(0, 10), cohort: cleanCohort(body.cohort) };
       await redis('HSET', 'users', email, JSON.stringify(user));
       await refreshScore(user);
       await log(email, 'Registered account', 'Account Setup');
@@ -147,19 +166,25 @@ export default async function handler(req, res) {
     const bookIdOf = () => String(body.bookId || '').slice(0, 100);
 
     if (action === 'init') {
-      const [views, prog, lb] = await Promise.all([hgetall('views'), hgetall(`progress:${me}`), leaderboard(me, admin)]);
-      const progress = {}, viewsNum = {};
+      const [views, prog, lb, metaRaw] = await Promise.all([hgetall('views'), hgetall(`progress:${me}`), leaderboard(me, admin), hgetall('meta')]);
+      const progress = {}, viewsNum = {}, meta = {};
+      for (const [k, v] of Object.entries(metaRaw)) { try { meta[k] = JSON.parse(v); } catch {} }
       for (const [k, v] of Object.entries(prog)) progress[k] = JSON.parse(v);
       for (const [k, v] of Object.entries(views)) viewsNum[k] = Number(v);
-      return res.json({ user: publicUser(user), views: viewsNum, progress, leaderboard: lb });
+      return res.json({ user: publicUser(user), views: viewsNum, progress, leaderboard: lb, meta });
     }
 
     if (action === 'open') {
       const bookId = bookIdOf(); if (!bookId) return fail(400, 'bookId required');
       const views = await redis('HINCRBY', 'views', bookId, 1);       // every open = +1 view
       const p = (await getProg(me, bookId)) || { seconds: 0, isFinished: false, opens: 0 };
+      const firstOpen = (p.opens || 0) === 0;
       p.opens = (p.opens || 0) + 1; p.lastBeat = Date.now(); p.lastRead = new Date().toISOString();
+      const dayNow = localDay();
+      const newDay = p.activeDay !== dayNow; p.activeDay = dayNow;
       await redis('HSET', `progress:${me}`, bookId, JSON.stringify(p));
+      if (firstOpen) await stInc('readers', bookId, 1);
+      if (newDay) await touchActive(me);
       await log(me, 'Opened book', String(body.title || bookId).slice(0, 120));
       return res.json({ views, progress: p });
     }
@@ -176,11 +201,16 @@ export default async function handler(req, res) {
       const day = new Date().toISOString().slice(0, 10);
       if (p.dayKey !== day) { p.dayKey = day; p.daySeconds = 0; }
       const before = Math.floor((p.seconds || 0) / 300);
+      let added = 0;
       if (p.lastBeat && gap <= BEAT_MAX && p.daySeconds < DAY_CAP_SECONDS) {
-        p.seconds = (p.seconds || 0) + gap; p.daySeconds += gap;
+        p.seconds = (p.seconds || 0) + gap; p.daySeconds += gap; added = Math.round(gap);
       }
       p.lastBeat = now; p.lastRead = new Date().toISOString();
+      const dayNow = localDay();
+      const newDay = p.activeDay !== dayNow; p.activeDay = dayNow;
       await redis('HSET', `progress:${me}`, bookId, JSON.stringify(p));
+      if (newDay) await touchActive(me);
+      if (added) { await stInc('seconds', bookId, added); await redis('HINCRBY', 'daily', dayNow, added); }
       const crossed30 = (p.seconds || 0) >= MIN_READ_SECONDS && (p.seconds || 0) - gap < MIN_READ_SECONDS;
       if (crossed30 || Math.floor((p.seconds || 0) / 300) !== before) await refreshScore(user);   // leaderboard updates every ~5 min and at 30 min
       return res.json({ seconds: Math.floor(p.seconds || 0) });
@@ -228,6 +258,7 @@ export default async function handler(req, res) {
       p.isFinished = true; p.finishedAt = new Date().toISOString(); p.lastRead = p.finishedAt;
       p.quiz = { answers, submittedAt: p.finishedAt, points: QUIZ_PTS, revoked: false };
       await redis('HSET', `progress:${me}`, bookId, JSON.stringify(p));
+      await stInc('finished', bookId, 1); await stInc('fsec', bookId, Math.round(p.seconds || 0)); await stInc('subm', bookId, 1);
       await refreshScore(user);
       await log(me, 'Finished book + submitted answers', String(body.title || bookId).slice(0, 120));
       return res.json({ progress: p, leaderboard: await leaderboard(me, admin) });
@@ -241,7 +272,7 @@ export default async function handler(req, res) {
       const [users, scores, logs, views] = await Promise.all([hgetall('users'), hgetall('scores'), redis('LRANGE', 'logs', 0, 49), hgetall('views')]);
       const students = Object.values(users).map((u) => JSON.parse(u)).filter((u) => !isAdminEmail(u.email)).map((u) => {
         const s = scores[u.email] ? JSON.parse(scores[u.email]) : { inProgress: 0, finished: 0, points: 0, seconds: 0 };
-        return { name: u.name, email: u.email, registeredAt: u.registeredAt, lastLogin: u.lastLogin || '', loginCount: u.loginCount || 0, inProgress: s.inProgress, finished: s.finished, points: s.points, seconds: s.seconds };
+        return { name: u.name, email: u.email, cohort: u.cohort || '', registeredAt: u.registeredAt, lastLogin: u.lastLogin || '', loginCount: u.loginCount || 0, inProgress: s.inProgress, finished: s.finished, points: s.points, seconds: s.seconds };
       });
       return res.json({ students, logs: logs.map((l) => JSON.parse(l)), totalViews: Object.values(views).reduce((a, v) => a + Number(v), 0), adminCount: Object.keys(users).filter(isAdminEmail).length });
     }
@@ -263,9 +294,16 @@ export default async function handler(req, res) {
       const rawU = await redis('HGET', 'users', email);
       const p = await getProg(email, bookId);
       if (!rawU || !p) return fail(404, 'Not found');
+      const wasFinished = !!p.isFinished;
+      const oldScore = typeof p.quiz?.score === 'number' ? p.quiz.score : null;
       p.isFinished = false;
       p.quiz = { ...(p.quiz || {}), revoked: true, points: 0 };
+      delete p.quiz.score;
       await redis('HSET', `progress:${email}`, bookId, JSON.stringify(p));
+      if (wasFinished) {
+        await stInc('finished', bookId, -1); await stInc('fsec', bookId, -Math.round(p.seconds || 0)); await stInc('rej', bookId, 1);
+        if (oldScore != null) { await stInc('qsum', bookId, -oldScore); await stInc('qcount', bookId, -1); }
+      }
       await refreshScore(JSON.parse(rawU));
       await log(email, `Answers rejected by ${me}`, String(body.title || bookId).slice(0, 120));
       return res.json({ ok: true });
@@ -323,6 +361,213 @@ export default async function handler(req, res) {
     if (action === 'resetCovers') {
       if (!admin) return fail(403, 'Admins only.');
       await redis('DEL', 'covers');
+      return res.json({ ok: true });
+    }
+
+    // ----- cohort (class group) used for "Required reading" -----
+    if (action === 'setCohort') {
+      user.cohort = cleanCohort(body.cohort);
+      await redis('HSET', 'users', me, JSON.stringify(user));
+      return res.json({ user: publicUser(user) });
+    }
+    if (action === 'setStudentCohort') {
+      if (!admin) return fail(403, 'Admins only.');
+      const email = String(body.email || '').toLowerCase();
+      const rawU = await redis('HGET', 'users', email);
+      if (!rawU) return fail(404, 'Student not found.');
+      const u = JSON.parse(rawU); u.cohort = cleanCohort(body.cohort);
+      await redis('HSET', 'users', email, JSON.stringify(u));
+      return res.json({ cohort: u.cohort });
+    }
+
+    // ----- catalogue editor: title / author / category / tags / featured / required-for-cohorts (stored here, Drive is untouched) -----
+    if (action === 'setMeta') {
+      if (!admin) return fail(403, 'Admins only.');
+      const bookId = bookIdOf(); if (!bookId) return fail(400, 'bookId required');
+      const m = body.meta || {}, clean = {};
+      if (str(m.title, 200)) clean.title = str(m.title, 200);
+      if (str(m.author, 120)) clean.author = str(m.author, 120);
+      if (str(m.category, 40)) clean.category = str(m.category, 40);
+      const tags = [...new Set((Array.isArray(m.tags) ? m.tags : []).map((t) => str(t, 30)).filter(Boolean))].slice(0, 10);
+      if (tags.length) clean.tags = tags;
+      if (m.featured) clean.featured = true;
+      const required = [...new Set((Array.isArray(m.required) ? m.required : []).map(cleanCohort).filter(Boolean))].slice(0, 20);
+      if (required.length) clean.required = required;
+      if (Object.keys(clean).length) await redis('HSET', 'meta', bookId, JSON.stringify(clean));
+      else await redis('HDEL', 'meta', bookId);
+      await log(me, 'Edited catalogue details', str(body.title, 120) || bookId);
+      return res.json({ meta: Object.keys(clean).length ? clean : null });
+    }
+
+    // ----- quiz rating (0-10) by library staff, used for "average quiz score" -----
+    if (action === 'rateQuiz') {
+      if (!admin) return fail(403, 'Admins only.');
+      const email = String(body.email || '').toLowerCase(), bookId = bookIdOf(), score = Number(body.score);
+      if (!Number.isInteger(score) || score < 0 || score > 10) return fail(400, 'Score must be a whole number from 0 to 10.');
+      const p = await getProg(email, bookId);
+      if (!p || !p.isFinished || !p.quiz || p.quiz.revoked) return fail(400, 'There are no active answers to rate.');
+      const old = typeof p.quiz.score === 'number' ? p.quiz.score : null;
+      p.quiz.score = score; p.quiz.ratedBy = me;
+      await redis('HSET', `progress:${email}`, bookId, JSON.stringify(p));
+      await stInc('qsum', bookId, score - (old || 0));
+      if (old == null) await stInc('qcount', bookId, 1);
+      return res.json({ ok: true, score });
+    }
+
+    // ----- analytics (admin) -----
+    if (action === 'analytics') {
+      if (!admin) return fail(403, 'Admins only.');
+      const days = Array.from({ length: 30 }, (_, i) => localDay(Date.now() - (29 - i) * 86400000));
+      const [hashes, dayCounts, emails] = await Promise.all([
+        Promise.all([...ST.map((f) => hgetall(`st:${f}`)), hgetall('views'), hgetall('daily')]),
+        Promise.all(days.map((d) => redis('SCARD', `active:${d}`))),
+        redis('HKEYS', 'users'),
+      ]);
+      const union = async (n) => {
+        const tmp = `tmp:u${n}:${crypto.randomBytes(4).toString('hex')}`;
+        await redis('SUNIONSTORE', tmp, ...days.slice(-n).map((d) => `active:${d}`));
+        const c = await redis('SCARD', tmp); await redis('EXPIRE', tmp, 60);
+        return c;
+      };
+      const [wau, mau] = await Promise.all([union(7), union(30)]);
+      const byField = {}; ST.forEach((f, i) => { byField[f] = hashes[i]; });
+      const views = hashes[ST.length], daily = hashes[ST.length + 1];
+      const ids = new Set([...Object.keys(views), ...ST.flatMap((f) => Object.keys(byField[f]))]);
+      const books = {};
+      ids.forEach((id) => {
+        const o = { views: Number(views[id] || 0) };
+        ST.forEach((f) => { o[f] = Number(byField[f][id] || 0); });
+        books[id] = o;
+      });
+      const dayKeys = Object.keys(daily).sort();
+      return res.json({
+        days: days.map((d, i) => ({ date: d, active: Number(dayCounts[i] || 0), seconds: Number(daily[d] || 0) })),
+        dau: Number(dayCounts[29] || 0), wau: Number(wau || 0), mau: Number(mau || 0),
+        totalSeconds: Object.values(byField.seconds).reduce((a, v) => a + Number(v), 0),
+        trackingSince: dayKeys[0] || '',
+        students: (emails || []).filter((e) => !isAdminEmail(e)).length,
+        books,
+      });
+    }
+    // Rebuild the per-book counters from every student's saved progress (run once after installing analytics; works in chunks).
+    if (action === 'rebuildStats') {
+      if (!admin) return fail(403, 'Admins only.');
+      const offset = Math.max(0, parseInt(body.offset, 10) || 0), CH = 40;
+      const emails = ((await redis('HKEYS', 'users')) || []).filter((e) => !isAdminEmail(e)).sort();
+      if (offset === 0) await redis('DEL', ...ST.map((f) => `st:${f}`));
+      const progs = await Promise.all(emails.slice(offset, offset + CH).map((e) => hgetall(`progress:${e}`)));
+      const acc = {};
+      const add = (f, id, n) => { if (!n) return; acc[f] = acc[f] || {}; acc[f][id] = (acc[f][id] || 0) + n; };
+      progs.forEach((prog) => {
+        for (const [id, raw] of Object.entries(prog)) {
+          const p = JSON.parse(raw), secs = Math.round(p.seconds || 0);
+          if ((p.opens || 0) > 0 || secs > 0) add('readers', id, 1);
+          add('seconds', id, secs);
+          if (p.isFinished) { add('finished', id, 1); add('fsec', id, secs); }
+          if (p.quiz && p.quiz.answers) add('subm', id, 1);
+          if (p.quiz && p.quiz.revoked) add('rej', id, 1);
+          if (p.isFinished && p.quiz && !p.quiz.revoked && typeof p.quiz.score === 'number') { add('qsum', id, p.quiz.score); add('qcount', id, 1); }
+        }
+      });
+      const cmds = [];
+      Object.keys(acc).forEach((f) => Object.entries(acc[f]).forEach(([id, n]) => cmds.push(['HINCRBY', `st:${f}`, id, n])));
+      await pipeline(cmds);
+      return res.json({ done: offset + CH >= emails.length, next: offset + CH, total: emails.length });
+    }
+    // Leaderboard with e-mail + cohort, for CSV/Excel export
+    if (action === 'exportLeaderboard') {
+      if (!admin) return fail(403, 'Admins only.');
+      const [scoresRaw, usersRaw] = await Promise.all([hgetall('scores'), hgetall('users')]);
+      const cohortOf = {}; Object.values(usersRaw).forEach((u) => { const x = JSON.parse(u); cohortOf[x.email] = x.cohort || ''; });
+      const all = Object.values(scoresRaw).map((x) => JSON.parse(x)).filter((x) => x.qualified && x.points > 0);
+      all.sort((a, b) => b.points - a.points || b.finished - a.finished || b.seconds - a.seconds || a.name.localeCompare(b.name));
+      let last = null, rank = 0;
+      return res.json({ leaderboard: all.map((x, i) => {
+        if (x.points !== last) { rank = i + 1; last = x.points; }
+        return { rank, name: x.name, email: x.email, cohort: cohortOf[x.email] || '', inProgress: x.inProgress, finished: x.finished, quizPts: x.quizPts, points: x.points, seconds: x.seconds };
+      }) });
+    }
+
+    // ----- Drive sync status, new/removed books, and problem files -----
+    if (action === 'syncReport') {
+      if (!admin) return fail(403, 'Admins only.');
+      const books = Array.isArray(body.books) ? body.books.slice(0, 20000) : [];
+      const skipped = Array.isArray(body.skipped) ? body.skipped.slice(0, 500) : [];
+      const errors = (Array.isArray(body.errors) ? body.errors : []).map((e) => str(e, 300)).slice(0, 20);
+      const cur = {}; books.forEach((b) => { if (Array.isArray(b) && b[0]) cur[str(b[0], 100)] = str(b[1], 80); });
+      const curIds = Object.keys(cur);
+      const prevRaw = await redis('GET', 'sync:snapshot');
+      const prev = prevRaw ? JSON.parse(prevRaw) : null;
+      const events = []; const cmds = []; let newIds = [], removedIds = [];
+      if (!curIds.length) {
+        if (errors.length) errors.forEach((e) => events.push(evt('error', '', 'Drive scan failed', e)));
+        else events.push(evt('error', '', 'Drive scan found no books', ''));
+      } else {
+        if (prev) {
+          newIds = curIds.filter((id) => !(id in prev));
+          if (!errors.length) removedIds = Object.keys(prev).filter((id) => !(id in cur));
+        } else events.push(evt('baseline', '', `First scan saved: ${curIds.length} books`, ''));
+        newIds.slice(0, 100).forEach((id) => events.push(evt('new', id, cur[id], 'New book found in Google Drive')));
+        if (newIds.length > 100) events.push(evt('new', '', `${newIds.length - 100} more new books`, ''));
+        removedIds.slice(0, 100).forEach((id) => events.push(evt('removed', id, prev[id], 'No longer found in Google Drive')));
+        if (removedIds.length > 100) events.push(evt('removed', '', `${removedIds.length - 100} more books removed`, ''));
+        errors.forEach((e) => events.push(evt('error', '', 'Some folders could not be read', e)));
+        cmds.push(['SET', 'sync:snapshot', JSON.stringify(errors.length && prev ? { ...prev, ...cur } : cur)]);
+      }
+      const issuesNow = await hgetall('issues');
+      const skipIds = new Set();
+      skipped.forEach((x) => {
+        const id = str(x.id, 100); if (!id) return;
+        skipIds.add(id);
+        const old = issuesNow[id] ? JSON.parse(issuesNow[id]) : null;
+        if (!old || old.type !== 'skipped') events.push(evt('skipped', id, str(x.title, 120), str(x.reason, 200)));
+        cmds.push(['HSET', 'issues', id, JSON.stringify({ type: 'skipped', title: str(x.title, 120), reason: str(x.reason, 200), ts: Date.now() })]);
+      });
+      for (const [id, raw] of Object.entries(issuesNow)) {
+        const it = JSON.parse(raw);
+        if ((it.type === 'skipped' && curIds.length && !skipIds.has(id)) || removedIds.includes(id)) cmds.push(['HDEL', 'issues', id]);
+      }
+      const last = { ts: Date.now(), total: curIds.length, newCount: newIds.length, removedCount: removedIds.length, skippedCount: skipped.length, errorCount: errors.length };
+      cmds.push(['SET', 'sync:last', JSON.stringify(last)]);
+      events.forEach((e) => cmds.push(['LPUSH', 'synclog', e]));
+      cmds.push(['LTRIM', 'synclog', 0, 499]);
+      await pipeline(cmds);
+      return res.json({ last, newCount: newIds.length, removedCount: removedIds.length });
+    }
+    if (action === 'syncStatus') {
+      if (!admin) return fail(403, 'Admins only.');
+      const [last, logs, issues] = await Promise.all([redis('GET', 'sync:last'), redis('LRANGE', 'synclog', 0, 199), hgetall('issues')]);
+      return res.json({
+        last: last ? JSON.parse(last) : null,
+        log: (logs || []).map((l) => JSON.parse(l)),
+        issues: Object.entries(issues).map(([id, r]) => ({ id, ...JSON.parse(r) })).sort((a, b) => b.ts - a.ts),
+      });
+    }
+    // Problems found by the admin tools (unreadable file, broken link) - and the ones that are fixed now
+    if (action === 'reportIssues') {
+      if (!admin) return fail(403, 'Admins only.');
+      const list = (Array.isArray(body.issues) ? body.issues : []).slice(0, 300);
+      const resolve = (Array.isArray(body.resolve) ? body.resolve : []).slice(0, 1000).map((x) => str(x, 100));
+      const issuesNow = await hgetall('issues');
+      const cmds = [];
+      list.forEach((x) => {
+        const id = str(x.id, 100); if (!id) return;
+        const type = ['parse', 'broken', 'skipped'].includes(x.type) ? x.type : 'parse';
+        const old = issuesNow[id] ? JSON.parse(issuesNow[id]) : null;
+        if (!old || old.type !== type) cmds.push(['LPUSH', 'synclog', evt(type, id, str(x.title, 120), str(x.reason, 200))]);
+        cmds.push(['HSET', 'issues', id, JSON.stringify({ type, title: str(x.title, 120), reason: str(x.reason, 200), ts: Date.now() })]);
+      });
+      let fixed = 0;
+      resolve.forEach((id) => { if (issuesNow[id]) { fixed++; cmds.push(['HDEL', 'issues', id]); } });
+      if (fixed) cmds.push(['LPUSH', 'synclog', evt('sync', '', `${fixed} problem(s) fixed`, '')]);
+      cmds.push(['LTRIM', 'synclog', 0, 499]);
+      await pipeline(cmds);
+      return res.json({ ok: true });
+    }
+    if (action === 'clearIssues') {
+      if (!admin) return fail(403, 'Admins only.');
+      const ids = Array.isArray(body.ids) ? body.ids.map((x) => str(x, 100)) : null;
+      if (ids && ids.length) await redis('HDEL', 'issues', ...ids); else await redis('DEL', 'issues');
       return res.json({ ok: true });
     }
 
