@@ -20,7 +20,14 @@ function toJpeg(drawable, w, h) {
 // PDF: draw the first page
 export async function pdfCover(url) {
   const task = pdfjsLib.getDocument({ url, rangeChunkSize: 1 << 20, disableAutoFetch: true });
-  const pdf = await task.promise;
+  let pdf;
+  try { pdf = await task.promise; }
+  catch (e) {
+    if (e?.name === 'InvalidPDFException') throw new Error('BAD_FILE: Not a valid PDF (damaged file)');
+    if (e?.name === 'MissingPDFException') throw new Error('BAD_FILE: File missing (HTTP 404)');
+    if (e?.name === 'PasswordException') throw new Error('BAD_FILE: Password-protected PDF');
+    throw e;                                  // network / quota problems are not the file's fault
+  }
   try {
     const page = await pdf.getPage(1);
     const vp0 = page.getViewport({ scale: 1 });
@@ -48,12 +55,12 @@ export async function epubCover(url) {
   const data = new Uint8Array(await res.arrayBuffer());
   let files;
   try { files = unzipSync(data, { filter: (f) => /\.(opf|xml|jpe?g|png|gif|webp)$/i.test(f.name) && f.originalSize < 8_000_000 }); }
-  catch { throw noCover(); }
+  catch { throw new Error('BAD_FILE: Not a valid EPUB (cannot open the zip)'); }
   const container = files['META-INF/container.xml'];
-  if (!container) throw noCover();
+  if (!container) throw new Error('BAD_FILE: EPUB is broken (no container.xml)');
   const parser = new DOMParser();
   const opfPath = parser.parseFromString(strFromU8(container), 'application/xml').querySelector('rootfile')?.getAttribute('full-path');
-  if (!opfPath || !files[opfPath]) throw noCover();
+  if (!opfPath || !files[opfPath]) throw new Error('BAD_FILE: EPUB is broken (package file missing)');
   const opf = parser.parseFromString(strFromU8(files[opfPath]), 'application/xml');
   const items = [...opf.querySelectorAll('manifest > item')];
   const isImg = (it) => (it.getAttribute('media-type') || '').startsWith('image/');

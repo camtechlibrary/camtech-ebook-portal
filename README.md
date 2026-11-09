@@ -28,3 +28,11 @@ Scoring (constants at the top of `api/portal.mjs`; matching ones in `src/App.jsx
 
 Theme: dark/light colours are CSS variables in `index.html`. Logo files are in `public/`.
 Covers: Admin -> Drive Sync -> "Generate missing covers" makes covers for books Drive has no thumbnail for.
+
+## Analytics, catalog editor and sync log (admin only)
+- **Admin -> Analytics:** daily/weekly/monthly active readers, hours read, completion rate, average time to finish and average quiz score per book and per subject. CSV export (opens in Excel) for engagement, books, categories, leaderboard and all students.
+  After installing, press "Recount from student records" once so earlier reading is included (the daily charts start from the install day).
+- **Admin -> Catalog Manager:** edit title, author, category, tags; pin books as Featured; mark books "Required" for cohorts (or ALL). Edits are saved in the portal (Redis); Google Drive files are not changed.
+- **Admin -> Drive Sync:** new/removed books, unreadable files, broken links (and a "Check all links" tool), scan errors.
+- **Cohort:** students enter their class/cohort at registration or in Account settings (key icon); admins can set it on the student profile. Students see "Required" badges for their cohort.
+- **Quiz score:** staff give each student's answers a 0-10 score in the student profile; that feeds "Avg quiz score".
