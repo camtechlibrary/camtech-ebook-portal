@@ -3,10 +3,11 @@ import PdfViewer from './PdfViewer.jsx';
 import AdminAnalytics from './AdminAnalytics.jsx';
 import CatalogManager, { BookEditor } from './CatalogManager.jsx';
 import SyncPanel from './SyncPanel.jsx';
+import UploadBooks from './UploadBooks.jsx';
 import {
   BookOpen, Search, CheckCircle, Clock, Shield, Grid, List, RefreshCw, Users, Eye,
   LogOut, X, ChevronLeft, Check, Sparkles, HardDrive, BookMarked, AlertCircle,
-  Trophy, Medal, Crown, FileText, Timer, Lock, Sun, Moon, KeyRound, Copy, ImageIcon, BarChart3, Pencil, Star, GraduationCap
+  Trophy, Medal, Crown, FileText, Timer, Lock, Sun, Moon, KeyRound, Copy, ImageIcon, BarChart3, Pencil, Star, GraduationCap, UploadCloud
 } from 'lucide-react';
 
 // ==========================================
@@ -17,7 +18,16 @@ const DRIVE_KEY = import.meta.env?.VITE_GDRIVE_API_KEY || '';
 const ALLOWED_DOMAIN = 'camtech.edu.kh';
 const ADMIN_EMAILS = ['camtech.library@camtech.edu.kh', 'sp6026010074@camtech.edu.kh'];
 const DEFAULT_CATS = ['Computer Science', 'AI & Data Science', 'Engineering', 'Business', 'GenEd'];
-const ADMIN_TABS = ['admin', 'analytics', 'manager', 'drive'];
+const ADMIN_TABS = ['admin', 'analytics', 'manager', 'upload', 'drive'];
+const GOOGLE_CLIENT_ID = import.meta.env?.VITE_GOOGLE_CLIENT_ID || '';
+const ADVISOR_FOLDER = (import.meta.env?.VITE_ADVISOR_FOLDER_NAME || 'CamTech Advisor').trim();   // folder inside the library folder: one sub-folder per professor
+const guessCategory = (n) => {
+  if (/\bai\b|data|python|neural|machine|learning/.test(n)) return 'AI & Data Science';
+  if (/code|cyber|program|system|software|network|computer/.test(n)) return 'Computer Science';
+  if (/math|calculus|physics|5g|engineering|control/.test(n)) return 'Engineering';
+  if (/business|finance|law|market|econom|manage/.test(n)) return 'Business';
+  return 'GenEd';
+};
 const COLORS = ['from-blue-700 to-indigo-900', 'from-emerald-700 to-teal-900', 'from-amber-600 to-red-800',
   'from-purple-700 to-[#1e1b4b]', 'from-[#1e293b] to-cyan-950', 'from-rose-700 to-pink-900'];
 const PAGE_SIZE = 48;
@@ -142,7 +152,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('catalog');
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('All');
-  const [selectedFormat, setSelectedFormat] = useState('All');
+  const [collection, setCollection] = useState('all');         // all | stem | advisor
+  const [professor, setProfessor] = useState('All');
   const [viewMode, setViewMode] = useState('grid');
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
@@ -150,13 +161,17 @@ export default function App() {
   const books = useMemo(() => rawBooks.map((b) => {
     const m = meta[b.id];
     const orig = { title: b.title, author: b.author, category: b.category };
-    if (!m) return { ...b, orig, tags: [], featured: false, required: [], edited: false };
-    return { ...b, orig, title: m.title || b.title, author: m.author || b.author, category: m.category || b.category, tags: m.tags || [], featured: !!m.featured, required: m.required || [], edited: true };
+    const metaAdvisors = m?.advisors || [];
+    const advisors = [...new Set([...(b.folderProf ? [b.folderProf] : []), ...metaAdvisors])];
+    if (!m) return { ...b, orig, tags: [], featured: false, required: [], advisors, metaAdvisors, edited: false };
+    return { ...b, orig, title: m.title || b.title, author: m.author || b.author, category: m.category || b.category, tags: m.tags || [], featured: !!m.featured, required: m.required || [], advisors, metaAdvisors, edited: true };
   }), [rawBooks, meta]);
   const allCats = useMemo(() => {
     const extra = [...new Set(books.map((b) => b.category))].filter((c) => !DEFAULT_CATS.includes(c)).sort();
     return [...DEFAULT_CATS, ...extra];
   }, [books]);
+  const professors = useMemo(() => [...new Set(books.flatMap((b) => b.advisors || []))].sort((a, b) => a.localeCompare(b)), [books]);
+  const collCounts = useMemo(() => ({ all: books.length, stem: books.filter((b) => b.zone !== 'advisor').length, advisor: books.filter((b) => (b.advisors || []).length > 0).length }), [books]);
   const knownCohorts = useMemo(() => [...new Set(books.flatMap((b) => b.required || []))].filter((c) => c !== 'ALL').sort(), [books]);
   const saveMeta = (id, m) => setMeta((prev) => { const n = { ...prev }; if (m) n[id] = m; else delete n[id]; return n; });
 
@@ -194,9 +209,10 @@ export default function App() {
     if (!DRIVE_KEY) { setCatalogError('Missing VITE_GDRIVE_API_KEY in Vercel environment variables.'); setCatalogLoading(false); return; }
     const all = [], skipped = [], errors = [];
     try {
-      const queue = [FOLDER_ID];
+      const queue = [{ id: FOLDER_ID, zone: 'stem', prof: '', depth: 0 }];
       while (queue.length) {
-        const folder = queue.shift();
+        const cur = queue.shift();
+        const folder = cur.id;
         let pageToken = '';
         try {
           do {
@@ -209,22 +225,23 @@ export default function App() {
             const data = await res.json();
             if (!res.ok) throw new Error(data.error?.message || `Google Drive request failed (HTTP ${res.status})`);
             for (const f of data.files || []) {
-              if (f.mimeType === 'application/vnd.google-apps.folder') { queue.push(f.id); continue; }
+              if (f.mimeType === 'application/vnd.google-apps.folder') {
+                let zone = cur.zone, prof = cur.prof;
+                if (cur.depth === 0 && f.name.trim().toLowerCase() === ADVISOR_FOLDER.toLowerCase()) { zone = 'advisor'; prof = ''; }
+                else if (cur.zone === 'advisor' && cur.depth === 1) prof = f.name.trim();
+                queue.push({ id: f.id, zone, prof, depth: cur.depth + 1 }); continue;
+              }
               if (f.mimeType.startsWith('application/vnd.google-apps')) continue;
               const n = f.name.toLowerCase();
               const isPdf = f.mimeType === 'application/pdf' || n.endsWith('.pdf');
               const isEpub = f.mimeType === 'application/epub+zip' || n.endsWith('.epub');
               if (!isPdf && !isEpub) skipped.push({ id: f.id, title: f.name, reason: `Unsupported file type (${(n.match(/\.([a-z0-9]{1,5})$/) || [])[1] || f.mimeType})` });
               else if (f.size === '0') skipped.push({ id: f.id, title: f.name, reason: 'Empty file (0 bytes)' });
-              let category = 'GenEd';
-              if (/\bai\b|data|python|neural|machine|learning/.test(n)) category = 'AI & Data Science';
-              else if (/code|cyber|program|system|software|network|computer/.test(n)) category = 'Computer Science';
-              else if (/math|calculus|physics|5g|engineering|control/.test(n)) category = 'Engineering';
-              else if (/business|finance|law|market|econom|manage/.test(n)) category = 'Business';
+              const category = guessCategory(n);
               all.push({
                 id: f.id, driveFileId: f.id,
                 title: f.name.replace(/\.(pdf|epub)$/i, '').replace(/[_.-]+/g, ' ').trim(),
-                author: 'CamTech Academic Press', category, format: isPdf ? 'PDF' : isEpub ? 'EPUB' : 'DOC',
+                author: 'CamTech Academic Press', category, zone: cur.zone, folderProf: cur.zone === 'advisor' ? (cur.prof || 'Unassigned') : '', format: isPdf ? 'PDF' : isEpub ? 'EPUB' : 'DOC',
                 fileSize: f.size ? (Number(f.size) / 1048576).toFixed(1) + ' MB' : '',
                 thumbnail: f.thumbnailLink ? f.thumbnailLink.replace(/=s\d+$/, '=s600') : '',
                 coverColor: COLORS[[...f.id].reduce((a, c) => a + c.charCodeAt(0), 0) % COLORS.length],
@@ -250,7 +267,8 @@ export default function App() {
   }, []);
 
   useEffect(() => { if (user) loadCatalog(); }, [user?.email, loadCatalog]);
-  useEffect(() => { setVisibleCount(PAGE_SIZE); }, [searchQuery, selectedCategory, selectedFormat, quick]);
+  useEffect(() => { setVisibleCount(PAGE_SIZE); }, [searchQuery, selectedCategory, collection, professor, quick]);
+  useEffect(() => { setSelectedCategory('All'); setProfessor('All'); }, [collection]);
 
   const loadAdmin = useCallback(async () => { setAdminData(await api('admin')); }, []);
   useEffect(() => { if (isAdmin && activeTab === 'admin') loadAdmin().catch(() => {}); }, [isAdmin, activeTab, loadAdmin]);
@@ -429,13 +447,17 @@ export default function App() {
     const words = searchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
     const rank = (b) => (b.featured ? 2 : 0) + (isRequiredForMe(b) ? 1 : 0);
     return books.filter((b) => {
-      const t = `${b.title} ${b.author} ${(b.tags || []).join(' ')}`.toLowerCase();
-      return (!words.length || words.every((w) => t.includes(w) || b.category.toLowerCase().includes(w)))
-        && (selectedCategory === 'All' || b.category === selectedCategory)
-        && (selectedFormat === 'All' || b.format === selectedFormat)
+      const t = `${b.title} ${b.author} ${(b.tags || []).join(' ')} ${(b.advisors || []).join(' ')}`.toLowerCase();
+      const inCollection = collection === 'all' || (collection === 'stem' && b.zone !== 'advisor') || (collection === 'advisor' && (b.advisors || []).length > 0);
+      return inCollection
+        && (!words.length || words.every((w) => t.includes(w) || b.category.toLowerCase().includes(w)))
+        && (collection !== 'all' || selectedCategory === 'All' || b.category === selectedCategory)
+        && (collection !== 'advisor' || professor === 'All' || (b.advisors || []).includes(professor))
         && (quick === 'all' || (quick === 'featured' && b.featured) || (quick === 'required' && isRequiredForMe(b)));
-    }).map((b, i) => [b, i]).sort(([a, i], [c, j]) => (rank(c) - rank(a)) || (i - j)).map(([b]) => b);   // pinned first
-  }, [books, searchQuery, selectedCategory, selectedFormat, quick, myCohort]);
+    }).map((b, i) => [b, i])
+      // pinned (featured / required) first, then the most viewed books, then A-Z
+      .sort(([a, i], [c, j]) => (rank(c) - rank(a)) || ((views[c.id] || 0) - (views[a.id] || 0)) || (i - j)).map(([b]) => b);
+  }, [books, views, searchQuery, collection, selectedCategory, professor, quick, myCohort]);
   const featuredCount = books.filter((b) => b.featured).length;
   const requiredCount = books.filter(isRequiredForMe).length;
   const myRank = board.find((r) => r.isMe);
@@ -525,7 +547,7 @@ export default function App() {
   );
   const AdminNav = () => (
     <div className="flex flex-wrap gap-2 border-b border-slate-800 pb-4">
-      {[['admin', 'Dashboard', Shield], ['analytics', 'Analytics', BarChart3], ['manager', 'Catalog Manager', Pencil], ['drive', 'Drive Sync', HardDrive]].map(([id, label, Icon]) => (
+      {[['admin', 'Dashboard', Shield], ['analytics', 'Analytics', BarChart3], ['manager', 'Catalog Manager', Pencil], ['upload', 'Upload Books', UploadCloud], ['drive', 'Drive Sync', HardDrive]].map(([id, label, Icon]) => (
         <button key={id} onClick={() => setActiveTab(id)} className={`px-4 py-2 rounded-xl text-xs font-semibold flex items-center gap-2 transition ${activeTab === id ? 'bg-amber-500 text-[#020617]' : 'bg-slate-900 border border-slate-800 text-slate-300 hover:bg-slate-800'}`}><Icon className="w-4 h-4" />{label}</button>
       ))}
     </div>
@@ -600,8 +622,8 @@ export default function App() {
                       className="w-full pl-12 pr-10 py-3.5 bg-slate-900/90 border border-slate-700/80 rounded-2xl text-slate-100 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-500 text-sm" />
                     {searchQuery && <button onClick={() => setSearchQuery('')} className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-100"><X className="w-4 h-4" /></button>}
                   </div>
-                  <select value={selectedFormat} onChange={(e) => setSelectedFormat(e.target.value)} className="px-4 py-3.5 bg-slate-900 border border-slate-700 rounded-2xl text-slate-300 text-sm w-full sm:w-auto">
-                    <option value="All">All Formats</option><option value="PDF">PDF Only</option><option value="EPUB">EPUB Only</option>
+                  <select value={collection} onChange={(e) => setCollection(e.target.value)} className="px-4 py-3.5 bg-slate-900 border border-slate-700 rounded-2xl text-slate-300 text-sm w-full sm:w-auto font-semibold">
+                    <option value="all">All Books ({collCounts.all.toLocaleString()})</option><option value="stem">STEM Resources ({collCounts.stem.toLocaleString()})</option><option value="advisor">CamTech Advisor ({collCounts.advisor.toLocaleString()})</option>
                   </select>
                 </div>
               </div>
@@ -611,10 +633,13 @@ export default function App() {
               <div className="flex items-center gap-2 overflow-x-auto w-full sm:w-auto pb-2 sm:pb-0">
                 {featuredCount > 0 && <button onClick={() => setQuick(quick === 'featured' ? 'all' : 'featured')} className={`px-4 py-2 rounded-xl text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 transition-all ${quick === 'featured' ? 'bg-amber-500 text-[#020617]' : 'bg-slate-900 border border-amber-500/40 text-amber-400 hover:bg-slate-800'}`}><Star className="w-3.5 h-3.5" /> Featured ({featuredCount})</button>}
                 {requiredCount > 0 && <button onClick={() => setQuick(quick === 'required' ? 'all' : 'required')} className={`px-4 py-2 rounded-xl text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 transition-all ${quick === 'required' ? 'bg-blue-600 text-white' : 'bg-slate-900 border border-blue-500/40 text-blue-400 hover:bg-slate-800'}`}><GraduationCap className="w-3.5 h-3.5" /> {isAdmin ? 'Required reading' : 'Required for me'} ({requiredCount})</button>}
-                {['All', ...allCats].map((cat) => (
-                  <button key={cat} onClick={() => setSelectedCategory(cat)}
-                    className={`px-4 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${selectedCategory === cat ? 'bg-amber-500 text-[#020617] shadow-md shadow-amber-500/20' : 'bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-100 hover:bg-slate-800'}`}>{cat}</button>
-                ))}
+                {(collection === 'stem' ? ['All'] : collection === 'advisor' ? ['All', ...professors] : ['All', ...allCats]).map((cat) => {
+                  const active = collection === 'advisor' ? professor === cat : selectedCategory === cat;
+                  return (
+                    <button key={cat} onClick={() => (collection === 'advisor' ? setProfessor(cat) : setSelectedCategory(cat))}
+                      className={`px-4 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${active ? 'bg-amber-500 text-[#020617] shadow-md shadow-amber-500/20' : 'bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-100 hover:bg-slate-800'}`}>{cat}</button>
+                  );
+                })}
               </div>
               <div className="flex items-center gap-4">
                 <span className="text-xs text-slate-400">Showing <strong className="text-slate-100">{filteredBooks.length}</strong> books</span>
@@ -648,6 +673,7 @@ export default function App() {
                       <div className="mt-3 flex-1 space-y-1">
                         <h4 className="font-bold text-slate-100 text-sm line-clamp-2 group-hover:text-amber-400 transition-colors">{book.title}</h4>
                         <p className="text-xs text-slate-400 line-clamp-1">{book.author}</p>
+                        {book.advisors.length > 0 && <p className="text-[11px] text-amber-400 line-clamp-1" title={book.advisors.join(', ')}>Recommended by {book.advisors.join(', ')}</p>}
                         <p className="text-[11px] text-slate-500">{book.category}{book.fileSize ? ` • ${book.fileSize}` : ''}</p>
                         {book.tags.length > 0 && <div className="flex flex-wrap gap-1 pt-0.5">{book.tags.slice(0, 3).map((t) => <span key={t} className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px]">{t}</span>)}</div>}
                       </div>
@@ -838,7 +864,14 @@ export default function App() {
           <div className="space-y-6"><AdminNav /><AdminAnalytics api={api} books={books} flash={flash} /></div>
         )}
         {isAdmin && activeTab === 'manager' && (
-          <div className="space-y-6"><AdminNav /><CatalogManager books={books} categories={allCats} cohorts={knownCohorts} api={api} flash={flash} onSaved={saveMeta} /></div>
+          <div className="space-y-6"><AdminNav /><CatalogManager books={books} categories={allCats} cohorts={knownCohorts} professors={professors} api={api} flash={flash} onSaved={saveMeta} /></div>
+        )}
+
+        {isAdmin && activeTab === 'upload' && (
+          <div className="space-y-6"><AdminNav />
+            <UploadBooks clientId={GOOGLE_CLIENT_ID} rootFolderId={FOLDER_ID} advisorFolderName={ADVISOR_FOLDER} driveKey={DRIVE_KEY} userEmail={user.email}
+              books={books} categories={allCats} professors={professors} cohorts={knownCohorts} guessCategory={guessCategory} api={api} flash={flash}
+              onDone={() => { loadCatalog(); loadInit().catch(() => {}); }} /></div>
         )}
 
         {/* ================= DRIVE SYNC (admin) ================= */}
@@ -951,7 +984,7 @@ export default function App() {
         </div>
       )}
 
-      {isAdmin && editBook && <BookEditor book={editBook} categories={allCats} cohorts={knownCohorts} api={api} onClose={() => setEditBook(null)} onSaved={(id, m) => { saveMeta(id, m); flash('Book details saved.'); }} />}
+      {isAdmin && editBook && <BookEditor book={editBook} categories={allCats} cohorts={knownCohorts} professors={professors} api={api} onClose={() => setEditBook(null)} onSaved={(id, m) => { saveMeta(id, m); flash('Book details saved.'); }} />}
 
       {/* CHANGE PASSWORD (forced after an admin reset) */}
       {(pwOpen || mustChange) && (

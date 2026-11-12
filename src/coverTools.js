@@ -52,7 +52,10 @@ const MIME = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'im
 export async function epubCover(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error('NETWORK ' + res.status);
-  const data = new Uint8Array(await res.arrayBuffer());
+  return epubCoverFromBytes(new Uint8Array(await res.arrayBuffer()));
+}
+
+export async function epubCoverFromBytes(data) {
   let files;
   try { files = unzipSync(data, { filter: (f) => /\.(opf|xml|jpe?g|png|gif|webp)$/i.test(f.name) && f.originalSize < 8_000_000 }); }
   catch { throw new Error('BAD_FILE: Not a valid EPUB (cannot open the zip)'); }

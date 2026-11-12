@@ -36,3 +36,11 @@ Covers: Admin -> Drive Sync -> "Generate missing covers" makes covers for books 
 - **Admin -> Drive Sync:** new/removed books, unreadable files, broken links (and a "Check all links" tool), scan errors.
 - **Cohort:** students enter their class/cohort at registration or in Account settings (key icon); admins can set it on the student profile. Students see "Required" badges for their cohort.
 - **Quiz score:** staff give each student's answers a 0-10 score in the student profile; that feeds "Avg quiz score".
+
+## Collections, professors, popularity, and uploading books
+- **Catalog search bar:** "All Books" / "STEM Resources" / "CamTech Advisor" (replaces the PDF/EPUB filter).
+  - STEM Resources = books in the main Drive library folder (not inside the CamTech Advisor folder). Only the "All" chip is shown.
+  - CamTech Advisor = books inside the `CamTech Advisor` folder (one sub-folder per professor) + any book an admin tags with "recommended by". Chips: All + one per professor.
+  - Books are listed most-viewed first (featured / required-for-you books are pinned above that).
+- **Drive layout:** `<library folder>/CamTech Advisor/<Professor name>/book.pdf`. The folder name can be changed with VITE_ADVISOR_FOLDER_NAME.
+- **Admin -> Upload Books:** uploads PDF/EPUB straight from the browser into Google Drive (STEM Resources, or CamTech Advisor > professor). One-time setup: create a Google OAuth *Web* client ID, add the site address under Authorized JavaScript origins, set VITE_GOOGLE_CLIENT_ID in Vercel. The admin who uploads signs in with Google and needs Editor access to the library folder.

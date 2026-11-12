@@ -393,6 +393,8 @@ export default async function handler(req, res) {
       if (m.featured) clean.featured = true;
       const required = [...new Set((Array.isArray(m.required) ? m.required : []).map(cleanCohort).filter(Boolean))].slice(0, 20);
       if (required.length) clean.required = required;
+      const advisors = [...new Set((Array.isArray(m.advisors) ? m.advisors : []).map((t) => str(t, 60)).filter(Boolean))].slice(0, 10);
+      if (advisors.length) clean.advisors = advisors;
       if (Object.keys(clean).length) await redis('HSET', 'meta', bookId, JSON.stringify(clean));
       else await redis('HDEL', 'meta', bookId);
       await log(me, 'Edited catalogue details', str(body.title, 120) || bookId);
@@ -486,6 +488,19 @@ export default async function handler(req, res) {
         if (x.points !== last) { rank = i + 1; last = x.points; }
         return { rank, name: x.name, email: x.email, cohort: cohortOf[x.email] || '', inProgress: x.inProgress, finished: x.finished, quizPts: x.quizPts, points: x.points, seconds: x.seconds };
       }) });
+    }
+
+    // ----- a book uploaded from the portal into Google Drive -----
+    if (action === 'logUpload') {
+      if (!admin) return fail(403, 'Admins only.');
+      const id = str(body.bookId, 100), title = str(body.title, 120), where = str(body.destination, 120);
+      if (!id) return fail(400, 'bookId required');
+      const snapRaw = await redis('GET', 'sync:snapshot');
+      const cmds = [['LPUSH', 'synclog', evt('new', id, title, `Uploaded from the portal by ${me} → ${where}`)], ['LTRIM', 'synclog', 0, 499]];
+      if (snapRaw) { const snap = JSON.parse(snapRaw); snap[id] = title.slice(0, 80); cmds.push(['SET', 'sync:snapshot', JSON.stringify(snap)]); }
+      await pipeline(cmds);
+      await log(me, 'Uploaded book', title || id);
+      return res.json({ ok: true });
     }
 
     // ----- Drive sync status, new/removed books, and problem files -----
