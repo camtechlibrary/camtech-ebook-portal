@@ -13,12 +13,10 @@ async function lookupExternalTitle(rawName) {
   const raw = String(rawName || '').replace(/\.(pdf|epub)$/i, '').trim();
   const digits = raw.replace(/[^0-9X]/gi, '');
 
-  // 1. Extract 13-digit ISBN (978/979...) FIRST so leading "101007" doesn't hijack it
   const isbn13Match = digits.match(/(97[89]\d{10})/);
   const isbn10Match = !isbn13Match ? raw.match(/(?:^|[^0-9])(\d{9}[\dX])(?:[^0-9]|$)/i) : null;
   const isbn = isbn13Match ? isbn13Match[1] : isbn10Match ? isbn10Match[1] : null;
 
-  // 2. Reconstruct DOI (handles "10.1007/978-...", "10_1007_978...", and "10 1007%978 3 030 26686 4")
   let doi = null;
   const standardDoi = raw.match(/(10\.\d{4,9}\/[-._;()/:A-Z0-9]+)/i);
   if (standardDoi) {
@@ -29,7 +27,6 @@ async function lookupExternalTitle(rawName) {
       const registrant = mangledDoi[1];
       let suffix = mangledDoi[2].trim();
       if (/^97[89][\s_-]*\d/.test(suffix)) {
-        // Springer / academic ISBN-DOI format: 10.1007/978-3-030-26686-4
         suffix = suffix.replace(/[\s_]+/g, '-');
       } else {
         suffix = suffix.replace(/[\s_]+/g, '/');
@@ -38,7 +35,7 @@ async function lookupExternalTitle(rawName) {
     }
   }
 
-  // Try Crossref (DOI)
+  // 1. Crossref by DOI
   if (doi) {
     try {
       const res = await fetch(`https://api.crossref.org/works/${encodeURIComponent(doi)}`);
@@ -50,8 +47,18 @@ async function lookupExternalTitle(rawName) {
     } catch {}
   }
 
-  // Try OpenLibrary (ISBN)
+  // 2. Crossref by ISBN filter (catches Springer/Elsevier books even without 10.1007 prefix)
   if (isbn) {
+    try {
+      const res = await fetch(`https://api.crossref.org/works?filter=isbn:${isbn}&rows=1`);
+      if (res.ok) {
+        const data = await res.json();
+        const t = data?.message?.items?.[0]?.title?.[0];
+        if (t && !isCodeOnlyTitle(t) && t.length > 3) return t.replace(/\s+/g, ' ').trim();
+      }
+    } catch {}
+
+    // 3. OpenLibrary by ISBN
     try {
       const res = await fetch(`https://openlibrary.org/api/books?bibkeys=ISBN:${isbn}&format=json&jscmd=data`);
       if (res.ok) {
@@ -61,7 +68,7 @@ async function lookupExternalTitle(rawName) {
       }
     } catch {}
 
-    // Try Google Books API (ISBN)
+    // 4. Google Books by ISBN
     try {
       const res = await fetch(`https://www.googleapis.com/books/v1/volumes?q=isbn:${isbn}`);
       if (res.ok) {
@@ -81,8 +88,14 @@ async function extractPdfCoverPageTitle(url) {
   if (workerVar && pdfjsLib.GlobalWorkerOptions) {
     pdfjsLib.GlobalWorkerOptions.workerSrc = workerVar;
   }
-  const loadingTask = pdfjsLib.getDocument({ url, rangeChunkSize: 65536, disableAutoFetch: true, disableStream: true });
-  const pdf = await loadingTask.promise;
+
+  let pdf;
+  try {
+    pdf = await pdfjsLib.getDocument({ url, rangeChunkSize: 65536, disableAutoFetch: true, disableStream: true }).promise;
+  } catch {
+    pdf = await pdfjsLib.getDocument(url).promise;
+  }
+
   try {
     const meta = await pdf.getMetadata().catch(() => null);
     const metaTitle = String(meta?.info?.Title || '').trim();
@@ -90,38 +103,42 @@ async function extractPdfCoverPageTitle(url) {
       metaTitle.length >= 4 &&
       metaTitle.length <= 160 &&
       !isCodeOnlyTitle(metaTitle) &&
-      !/^(untitled|microsoft word|adobe|document|book|cover|page|doi|10\.\d+)/i.test(metaTitle)
+      !/^(untitled|microsoft word|adobe|document|book|cover|page|doi|10\.\d+|\d+[-_\s]*\d+)/i.test(metaTitle)
     ) {
       return metaTitle.replace(/\s+/g, ' ').trim();
     }
 
-    const page = await pdf.getPage(1);
-    const textContent = await page.getTextContent();
-    const skip = /^(https?:\/\/|www\.|isbn|doi|copyright|all rights reserved|springer|elsevier|wiley|palgrave|cambridge university press|oxford university press|pearson|mcgraw|oreilly|o'reilly|apress|packt|manning|crc press|routledge|volume|vol\.|edition|issn|printed in)/i;
+    const skip = /^(https?:\/\/|www\.|isbn|doi|copyright|all rights reserved|springer|elsevier|wiley|palgrave|cambridge university press|oxford university press|pearson|mcgraw|oreilly|o'reilly|apress|packt|manning|crc press|routledge|volume|vol\.|edition|issn|printed in|library of congress|editorial|preface|contents|table of contents)/i;
+    const maxPages = Math.min(pdf.numPages || 1, 3);
 
-    const items = (textContent.items || [])
-      .map((it) => {
-        const str = String(it.str || '').replace(/\s+/g, ' ').trim();
-        const fontSize = Math.abs(it.transform?.[0] || it.height || 0);
-        const y = it.transform?.[5] || 0;
-        return { str, fontSize, y };
-      })
-      .filter((it) => it.str.length >= 2 && /[a-zA-Z]{2,}/.test(it.str) && !skip.test(it.str));
+    // Check Page 1 (cover), then Page 2 & Page 3 (inside title page if Page 1 is an image-only cover)
+    for (let pageNum = 1; pageNum <= maxPages; pageNum++) {
+      const page = await pdf.getPage(pageNum);
+      const textContent = await page.getTextContent();
+      const items = (textContent.items || [])
+        .map((it) => {
+          const str = String(it.str || '').replace(/\s+/g, ' ').trim();
+          const fontSize = Math.abs(it.transform?.[0] || it.height || 0);
+          const y = it.transform?.[5] || 0;
+          return { str, fontSize, y };
+        })
+        .filter((it) => it.str.length >= 2 && /[a-zA-Z]{2,}/.test(it.str) && !skip.test(it.str));
 
-    if (!items.length) return null;
+      if (!items.length) continue;
 
-    const maxFont = Math.max(...items.map((i) => i.fontSize));
-    const headlineItems = items.filter((i) => i.fontSize >= maxFont * 0.68);
-    headlineItems.sort((a, b) => b.y - a.y);
+      const maxFont = Math.max(...items.map((i) => i.fontSize));
+      const headlineItems = items.filter((i) => i.fontSize >= maxFont * 0.65);
+      headlineItems.sort((a, b) => b.y - a.y);
 
-    const joined = headlineItems
-      .map((i) => i.str)
-      .join(' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 150);
+      const joined = headlineItems
+        .map((i) => i.str)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 150);
 
-    if (joined.length >= 4 && !isCodeOnlyTitle(joined)) return joined;
+      if (joined.length >= 4 && !isCodeOnlyTitle(joined)) return joined;
+    }
   } finally {
     await pdf.destroy().catch(() => {});
   }
