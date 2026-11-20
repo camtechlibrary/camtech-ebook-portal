@@ -25,11 +25,18 @@ const ADVISOR_FOLDER = (import.meta.env?.VITE_ADVISOR_FOLDER_NAME || 'CamTech Ad
 const cleanDriveTitle = (rawFileName) => {
   let base = String(rawFileName || '').replace(/\.(pdf|epub)$/i, '').trim();
   const original = base.replace(/[_.-]+/g, ' ').replace(/\s+/g, ' ').trim();
-  base = base.replace(/^10[\.\s_-]\d{4,5}[/\.\s_-][\d\.\s_-]+/i, '');
-  base = base.replace(/^[\[\(]?(?:978|979)[\s_-]*\d[\d\s_-]{8,16}[\]\)]?[\s._:-]+/i, '');
-  base = base.replace(/^(?:isbn|doi|id|book|doc|code|no)[\s._:-]*[\dXx-]{3,}[\s._:-]+/i, '');
-  base = base.replace(/^[\[\(]?\d{5,}[\]\)]?[\s._:-]+/, '');
-  base = base.replace(/^[\[\(]\d{1,6}[\]\)]\s*/, '');
+  // Strip leading DOI prefix when followed by a real title
+  base = base.replace(/^10[\.\s_-]\d{4,9}[%\/\.\s_-]+[\d%\/\.\s_-]+(?=[a-zA-Z]{3,})/i, '');
+  // Strip leading ISBN-13 (978/979...) followed by separator and title
+  base = base.replace(/^[\[\(]?(?:978|979)[\s_-]*\d[\d\s_-]{8,16}[\]\)]?[\s._:-]+(?=[a-zA-Z]{2,})/i, '');
+  // Strip explicit code/id labels (e.g. ISBN_1234_Title, ID-123-Title)
+  base = base.replace(/^(?:isbn|doi|id|book|doc|code|no)[\s._:-]*[\dXx-]{3,}[\s._:-]+(?=[a-zA-Z]{2,})/i, '');
+  // Strip 5+ digit catalog numbers at the front (e.g. "10000 Managing Distributed..." -> "Managing Distributed...")
+  base = base.replace(/^[\[\(]?\d{5,}[\]\)]?[\s._:-]+(?=[a-zA-Z]{2,})/, '');
+  // Strip leading-zero or separator-delimited 3-4 digit codes (e.g. "0123 Title" or "1004_Title"), preserving "1000 Useful Words"
+  base = base.replace(/^(?:0\d{2,4}|\d{3,4}[_-])[\s._:-]*(?=[a-zA-Z]{2,})/, '');
+  // Strip bracketed numbers [123] Title
+  base = base.replace(/^[\[\(]\d{1,6}[\]\)]\s*(?=[a-zA-Z]{2,})/, '');
   const cleaned = base.replace(/[_.-]+/g, ' ').replace(/\s+/g, ' ').trim();
   return /[a-zA-Z]{2,}/.test(cleaned) ? cleaned : original;
 };
