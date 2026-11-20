@@ -29,9 +29,24 @@ const cleanDriveTitle = (rawFileName) => {
   base = base.replace(/^10[\.\s_-]\d{4,9}[%\/\.\s_-]+[\d%\/\.\s_-]+(?=\S)/i, '');
   base = base.replace(/^[\[\(]?(?:978|979)[\s_-]*\d[\d\s_-]{8,16}[\]\)]?[\s._:-]+(?=\S)/i, '');
   base = base.replace(/^(?:isbn|doi|id|book|doc|code|no)[\s._:-]*[\dXx-]{3,}[\s._:-]+(?=\S)/i, '');
-  base = base.replace(/^(?:[\[\(]?\d{5,}[\]\)]?[\s._:-]+)+(?=\S)/, '');
-  base = base.replace(/^(?:0\d{2,4}[\s._:-]+)+(?=[a-zA-Z])/, '');
   base = base.replace(/^(?:[\[\(]\d{1,6}[\]\)]\s*)+(?=\S)/, '');
+  while (true) {
+    const m = base.match(/^(\d+)[\s._:-]+(?=\S)/);
+    if (!m) break;
+    const numStr = m[1];
+    const num = Number(numStr);
+    const rest = base.slice(m[0].length);
+    const isLeadingZero = numStr.length > 1 && numStr.startsWith('0');
+    const is5Plus = numStr.length >= 5;
+    const isYear = num >= 1900 && num <= 2099;
+    const isQtyWord = /^(?:problems|tips|tricks|ways|rules|steps|days|ideas|projects|questions|puzzles|exercises|examples|facts|things|lessons|secrets|mistakes|words|models)\b/i.test(rest);
+    const is3or4Id = (numStr.length === 3 || numStr.length === 4) && !isYear && num !== 100 && num !== 1000 && !isQtyWord;
+    if ((isLeadingZero || is5Plus || is3or4Id) && /[a-zA-Z]/.test(rest)) {
+      base = rest;
+      continue;
+    }
+    break;
+  }
   const cleaned = base.replace(/[_.-]+/g, ' ').replace(/\s+/g, ' ').trim();
   return /[a-zA-Z]/.test(cleaned) ? cleaned : original;
 };
@@ -237,7 +252,7 @@ export default function App() {
           do {
             const params = new URLSearchParams({
               q: `'${folder}' in parents and trashed=false`, pageSize: '1000', key: DRIVE_KEY,
-              fields: 'nextPageToken,files(id,name,mimeType,size,thumbnailLink,createdTime)',
+              fields: 'nextPageToken,files(id,name,mimeType,size,thumbnailLink,createdTime,description,originalFilename)',
             });
             if (pageToken) params.set('pageToken', pageToken);
             const res = await fetch(`https://www.googleapis.com/drive/v3/files?${params}`);
@@ -259,7 +274,7 @@ export default function App() {
               const category = guessCategory(n);
               all.push({
                 id: f.id, driveFileId: f.id,
-                title: cleanDriveTitle(f.name), rawFileName: f.name,
+                title: (() => { const t = cleanDriveTitle(f.name); if (!isCodeOnlyTitle(t)) return t; const alt = cleanDriveTitle(f.originalFilename || f.description || ""); return !isCodeOnlyTitle(alt) ? alt : t; })(), rawFileName: f.originalFilename || f.name,
                 author: '', category, zone: cur.zone, folderProf: cur.zone === 'advisor' ? (cur.prof || 'Unassigned') : '', format: isPdf ? 'PDF' : isEpub ? 'EPUB' : 'DOC',
                 fileSize: f.size ? (Number(f.size) / 1048576).toFixed(1) + ' MB' : '',
                 thumbnail: f.thumbnailLink ? f.thumbnailLink.replace(/=s\d+$/, '=s600') : '',
@@ -328,14 +343,16 @@ export default function App() {
   }, []);
 
   const autoTitleRanRef = useRef(false);
+  const [titleSyncStatus, setTitleSyncStatus] = useState(null);
   useEffect(() => {
     if (!isAdmin || !DRIVE_KEY || !books.length || autoTitleRanRef.current) return;
     const todo = books.filter((b) => isCodeOnlyTitle(b.title));
     if (!todo.length) return;
     autoTitleRanRef.current = true;
     let cancelled = false;
+    setTitleSyncStatus({ done: 0, total: todo.length, fixed: 0 });
     (async () => {
-      let idx = 0;
+      let idx = 0, done = 0, fixed = 0;
       const batch = [];
       const flush = async () => {
         if (!batch.length) return;
@@ -351,13 +368,17 @@ export default function App() {
           if (!b) break;
           const realTitle = await resolveCoverTitle(b, DRIVE_KEY).catch(() => null);
           if (realTitle && !isCodeOnlyTitle(realTitle)) {
+            fixed++;
             batch.push({ bookId: b.id, title: realTitle });
             if (batch.length >= 10) await flush();
           }
+          done++;
+          if (!cancelled) setTitleSyncStatus({ done, total: todo.length, fixed });
         }
       };
       await Promise.all([worker(), worker(), worker()]);
       await flush();
+      if (!cancelled) setTitleSyncStatus(null);
     })();
     return () => { cancelled = true; };
   }, [isAdmin, books]);
@@ -667,7 +688,12 @@ export default function App() {
             <div className="relative overflow-hidden rounded-3xl hero-bg border border-slate-800 p-6 sm:p-10 shadow-2xl">
               <div className="max-w-3xl space-y-4">
                 <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/20 text-blue-400 text-xs font-semibold"><Sparkles className="w-3.5 h-3.5 text-amber-400" /> Connected to Google Drive Repository</div>
-                <h1 className="text-3xl sm:text-4xl font-extrabold text-slate-100 tracking-tight font-serif">CamTech Digital Library & Textbook Hub</h1>
+                <h1 className="text-3xl sm:text-4xl font-extrabold text-slate-100 tracking-tight font-serif">CamTech Digital Library & Textbook Hub
+          {titleSyncStatus && (
+            <div className="mt-2 inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-500/15 border border-amber-500/30 text-amber-300 text-xs font-mono">
+              Resolving number-only titles: {titleSyncStatus.done}/{titleSyncStatus.total} ({titleSyncStatus.fixed} fixed)
+            </div>
+          )}</h1>
                 <p className="text-slate-300 text-sm sm:text-base">Read, answer the 10 questions, and climb the leaderboard.</p>
                 <div className="pt-2 flex flex-col sm:flex-row items-center gap-3">
                   <div className="relative w-full">
