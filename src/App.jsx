@@ -5,6 +5,7 @@ import CatalogManager, { BookEditor } from './CatalogManager.jsx';
 import SyncPanel from './SyncPanel.jsx';
 import UploadBooks from './UploadBooks.jsx';
 import CategoryManager from './CategoryManager.jsx';
+import { isCodeOnlyTitle, resolveCoverTitle } from './titleExtractor.js';
 import {
   BookOpen, Search, CheckCircle, Clock, Shield, Grid, List, RefreshCw, Users, Eye,
   LogOut, X, ChevronLeft, Check, Sparkles, HardDrive, BookMarked, AlertCircle,
@@ -25,18 +26,18 @@ const ADVISOR_FOLDER = (import.meta.env?.VITE_ADVISOR_FOLDER_NAME || 'CamTech Ad
 const cleanDriveTitle = (rawFileName) => {
   let base = String(rawFileName || '').replace(/\.(pdf|epub)$/i, '').trim();
   const original = base.replace(/[_.-]+/g, ' ').replace(/\s+/g, ' ').trim();
-  // Strip leading DOI prefix when followed by a real title
+  // Strip leading DOI prefix when followed by title words
   base = base.replace(/^10[\.\s_-]\d{4,9}[%\/\.\s_-]+[\d%\/\.\s_-]+(?=[a-zA-Z]{3,})/i, '');
-  // Strip leading ISBN-13 (978/979...) followed by separator and title
+  // Strip leading ISBN-13 (978/979...) followed by separator and title words
   base = base.replace(/^[\[\(]?(?:978|979)[\s_-]*\d[\d\s_-]{8,16}[\]\)]?[\s._:-]+(?=[a-zA-Z]{2,})/i, '');
   // Strip explicit code/id labels (e.g. ISBN_1234_Title, ID-123-Title)
   base = base.replace(/^(?:isbn|doi|id|book|doc|code|no)[\s._:-]*[\dXx-]{3,}[\s._:-]+(?=[a-zA-Z]{2,})/i, '');
-  // Strip 5+ digit catalog numbers at the front (e.g. "10000 Managing Distributed..." -> "Managing Distributed...")
-  base = base.replace(/^[\[\(]?\d{5,}[\]\)]?[\s._:-]+(?=[a-zA-Z]{2,})/, '');
+  // Strip ONE OR MORE consecutive 5+ digit catalog/ID numbers at the start (e.g. "2167875895 10000 Managing..." -> "Managing...")
+  base = base.replace(/^(?:[\[\(]?\d{5,}[\]\)]?[\s._:-]+)+(?=[a-zA-Z]{2,})/, '');
   // Strip leading-zero or separator-delimited 3-4 digit codes (e.g. "0123 Title" or "1004_Title"), preserving "1000 Useful Words"
-  base = base.replace(/^(?:0\d{2,4}|\d{3,4}[_-])[\s._:-]*(?=[a-zA-Z]{2,})/, '');
+  base = base.replace(/^(?:(?:0\d{2,4}|\d{3,4}[_-])[\s._:-]*)+(?=[a-zA-Z]{2,})/, '');
   // Strip bracketed numbers [123] Title
-  base = base.replace(/^[\[\(]\d{1,6}[\]\)]\s*(?=[a-zA-Z]{2,})/, '');
+  base = base.replace(/^(?:[\[\(]\d{1,6}[\]\)]\s*)+(?=[a-zA-Z]{2,})/, '');
   const cleaned = base.replace(/[_.-]+/g, ' ').replace(/\s+/g, ' ').trim();
   return /[a-zA-Z]{2,}/.test(cleaned) ? cleaned : original;
 };
@@ -331,6 +332,41 @@ export default function App() {
       try { const d = await api('covers', { ids: need.slice(i, i + 60) }); setCovers((c) => ({ ...c, ...d.covers })); } catch {}
     }
   }, []);
+
+  const autoTitleRanRef = useRef(false);
+  useEffect(() => {
+    if (!isAdmin || !DRIVE_KEY || !books.length || autoTitleRanRef.current) return;
+    const todo = books.filter((b) => isCodeOnlyTitle(b.title));
+    if (!todo.length) return;
+    autoTitleRanRef.current = true;
+    let cancelled = false;
+    (async () => {
+      let idx = 0;
+      const batch = [];
+      const flush = async () => {
+        if (!batch.length) return;
+        const chunk = batch.splice(0, batch.length);
+        try {
+          const res = await api('bulkSetMeta', { updates: chunk });
+          if (res?.meta) setMeta((prev) => ({ ...prev, ...res.meta }));
+        } catch {}
+      };
+      const worker = async () => {
+        while (!cancelled) {
+          const b = todo[idx++];
+          if (!b) break;
+          const realTitle = await resolveCoverTitle(b, DRIVE_KEY).catch(() => null);
+          if (realTitle && !isCodeOnlyTitle(realTitle)) {
+            batch.push({ bookId: b.id, title: realTitle });
+            if (batch.length >= 10) await flush();
+          }
+        }
+      };
+      await Promise.all([worker(), worker(), worker()]);
+      await flush();
+    })();
+    return () => { cancelled = true; };
+  }, [isAdmin, books]);
 
   const runCoverGen = async () => {
     covStop.current = false;
