@@ -1,5 +1,4 @@
-import * as pdfjsLib from 'pdfjs-dist';
-pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
+import workerUrl from 'pdfjs-dist/build/pdf.worker.min.js?url';
 
 export function isCodeOnlyTitle(title) {
   const t = String(title || '').trim();
@@ -43,10 +42,14 @@ async function lookupExternalTitle(rawName) {
 }
 
 async function extractPdfCoverPageTitle(url) {
+  const pdfjsLib = await import('pdfjs-dist');
+  const workerVar = typeof workerUrl !== 'undefined' ? workerUrl : (typeof pdfWorker !== 'undefined' ? pdfWorker : null);
+  if (workerVar && pdfjsLib.GlobalWorkerOptions) {
+    pdfjsLib.GlobalWorkerOptions.workerSrc = workerVar;
+  }
   const loadingTask = pdfjsLib.getDocument({ url, rangeChunkSize: 65536, disableAutoFetch: true, disableStream: true });
   const pdf = await loadingTask.promise;
   try {
-    // 1. Check embedded PDF Title metadata if valid
     const meta = await pdf.getMetadata().catch(() => null);
     const metaTitle = String(meta?.info?.Title || '').trim();
     if (
@@ -58,7 +61,6 @@ async function extractPdfCoverPageTitle(url) {
       return metaTitle.replace(/\s+/g, ' ').trim();
     }
 
-    // 2. Read Page 1 (the Cover Page) text items and pick the largest font-size title lines
     const page = await pdf.getPage(1);
     const textContent = await page.getTextContent();
     const skip = /^(https?:\/\/|www\.|isbn|doi|copyright|all rights reserved|springer|elsevier|wiley|palgrave|cambridge university press|oxford university press|pearson|mcgraw|oreilly|o'reilly|apress|packt|manning|crc press|routledge|volume|vol\.|edition|issn|printed in)/i;
@@ -75,9 +77,7 @@ async function extractPdfCoverPageTitle(url) {
     if (!items.length) return null;
 
     const maxFont = Math.max(...items.map((i) => i.fontSize));
-    // Keep prominent cover text (>= 68% of the largest title font on the cover)
     const headlineItems = items.filter((i) => i.fontSize >= maxFont * 0.68);
-    // Sort top-to-bottom on the cover page
     headlineItems.sort((a, b) => b.y - a.y);
 
     const joined = headlineItems

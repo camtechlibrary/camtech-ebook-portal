@@ -97,7 +97,7 @@ export default function CatalogManager({ books, categories, cohorts, professors 
       const chunk = pendingBatch.splice(0, pendingBatch.length);
       try {
         const res = await api('bulkSetMeta', { updates: chunk });
-        if (res?.meta && onBulkSaved) onBulkSaved(res.meta);
+        if (res?.meta && onSaved) Object.entries(res.meta).forEach(([id, m]) => onSaved(id, m));
       } catch {}
     };
 
