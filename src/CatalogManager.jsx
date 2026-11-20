@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
+import { isCodeOnlyTitle, resolveCoverTitle } from './titleExtractor.js';
 import { Pencil, Search, Star, GraduationCap, Tag, X, Check, AlertCircle, UserCheck } from 'lucide-react';
 
 const inputCls = 'w-full px-3 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500';
@@ -73,12 +74,54 @@ export function BookEditor({ book, categories, cohorts, professors = [], api, on
   );
 }
 
-export default function CatalogManager({ books, categories, cohorts, professors = [], onEditCategories, api, onSaved, flash }) {
+export default function CatalogManager({ books, categories, cohorts, professors = [], driveKey = "", onEditCategories, api, onSaved, onBulkSaved, flash }) {
   const [q, setQ] = useState('');
   const [cat, setCat] = useState('All');
   const [flag, setFlag] = useState('all');
   const [show, setShow] = useState(50);
   const [edit, setEdit] = useState(null);
+  const [fixingTitles, setFixingTitles] = useState({ running: false, done: 0, total: 0, fixed: 0, current: '' });
+  const stopFixRef = useRef(false);
+  const codeOnlyBooks = useMemo(() => books.filter((b) => isCodeOnlyTitle(b.title)), [books]);
+
+  const runCoverTitleFix = async () => {
+    const todo = [...codeOnlyBooks];
+    if (!todo.length) { flash?.('All books already have readable titles!'); return; }
+    stopFixRef.current = false;
+    setFixingTitles({ running: true, done: 0, total: todo.length, fixed: 0, current: '' });
+    let idx = 0, done = 0, fixed = 0;
+    const pendingBatch = [];
+
+    const flushBatch = async () => {
+      if (!pendingBatch.length) return;
+      const chunk = pendingBatch.splice(0, pendingBatch.length);
+      try {
+        const res = await api('bulkSetMeta', { updates: chunk });
+        if (res?.meta && onBulkSaved) onBulkSaved(res.meta);
+      } catch {}
+    };
+
+    const worker = async () => {
+      while (!stopFixRef.current) {
+        const b = todo[idx++];
+        if (!b) break;
+        setFixingTitles((s) => ({ ...s, current: b.title }));
+        const realTitle = await resolveCoverTitle(b, driveKey).catch(() => null);
+        if (realTitle && !isCodeOnlyTitle(realTitle)) {
+          fixed++;
+          pendingBatch.push({ bookId: b.id, title: realTitle });
+          if (pendingBatch.length >= 15) await flushBatch();
+        }
+        done++;
+        setFixingTitles((s) => ({ ...s, done, fixed }));
+      }
+    };
+
+    await Promise.all([worker(), worker(), worker()]);
+    await flushBatch();
+    setFixingTitles((s) => ({ ...s, running: false, current: '' }));
+    flash?.(`Updated ${fixed} book titles from their cover pages!`);
+  };
 
   const counts = useMemo(() => ({ edited: books.filter((b) => b.edited).length, featured: books.filter((b) => b.featured).length, required: books.filter((b) => (b.required || []).length).length, advisor: books.filter((b) => (b.advisors || []).length).length }), [books]);
   const list = useMemo(() => {
@@ -87,7 +130,7 @@ export default function CatalogManager({ books, categories, cohorts, professors 
       const hay = `${b.title} ${b.author} ${(b.tags || []).join(' ')} ${(b.advisors || []).join(' ')}`.toLowerCase();
       return (!words.length || words.every((w) => hay.includes(w)))
         && (cat === 'All' || b.category === cat)
-        && (flag === 'all' || (flag === 'edited' && b.edited) || (flag === 'featured' && b.featured) || (flag === 'required' && (b.required || []).length) || (flag === 'advisor' && (b.advisors || []).length));
+        && (flag === 'all' || (flag === 'codeonly' && isCodeOnlyTitle(b.title)) || (flag === 'edited' && b.edited) || (flag === 'featured' && b.featured) || (flag === 'required' && (b.required || []).length) || (flag === 'advisor' && (b.advisors || []).length));
     });
   }, [books, q, cat, flag]);
 
@@ -97,7 +140,21 @@ export default function CatalogManager({ books, categories, cohorts, professors 
       <div>
         <h2 className="text-2xl font-bold text-slate-100 font-serif flex items-center gap-2"><Pencil className="w-6 h-6 text-amber-400" /> Catalog Manager</h2>
         <p className="text-slate-400 text-sm">Fix titles, authors and categories, add tags, pin featured books and mark course-required reading — no need to re-upload to Google Drive.</p>
-        {onEditCategories && <button onClick={onEditCategories} className="mt-3 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-semibold inline-flex items-center gap-1.5"><Tag className="w-3.5 h-3.5 text-amber-400" /> Add / rename / remove categories</button>}
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {onEditCategories && <button onClick={onEditCategories} className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-semibold inline-flex items-center gap-1.5"><Tag className="w-3.5 h-3.5 text-amber-400" /> Add / rename / remove categories</button>}
+          {!fixingTitles.running ? (
+            <button onClick={runCoverTitleFix} className="px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold inline-flex items-center gap-1.5">
+              Fix Cover Titles ({codeOnlyBooks.length} code/number-only)
+            </button>
+          ) : (
+            <button onClick={() => { stopFixRef.current = true; }} className="px-3 py-2 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold inline-flex items-center gap-1.5">
+              Stop ({fixingTitles.done}/{fixingTitles.total} checked • {fixingTitles.fixed} fixed)
+            </button>
+          )}
+        </div>
+        {fixingTitles.running && (
+          <p className="mt-2 text-xs text-amber-400 font-mono truncate">Reading cover page: {fixingTitles.current}</p>
+        )}
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 max-w-3xl">
         {[['Edited', counts.edited, 'text-amber-400'], ['Featured', counts.featured, 'text-amber-400'], ['Required reading', counts.required, 'text-blue-400'], ['CamTech Advisor', counts.advisor, 'text-amber-400']].map(([l, v, c]) => (
@@ -109,7 +166,7 @@ export default function CatalogManager({ books, categories, cohorts, professors 
             <input value={q} onChange={(e) => { setQ(e.target.value); setShow(50); }} placeholder="Search title, author or tag..." className="w-full pl-9 pr-3 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-slate-100 placeholder-slate-500 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500" /></div>
           <select value={cat} onChange={(e) => { setCat(e.target.value); setShow(50); }} className="px-3 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-slate-300 text-sm"><option>All</option>{categories.map((c) => <option key={c}>{c}</option>)}</select>
           <select value={flag} onChange={(e) => { setFlag(e.target.value); setShow(50); }} className="px-3 py-2.5 bg-slate-950 border border-slate-800 rounded-xl text-slate-300 text-sm">
-            <option value="all">All books</option><option value="edited">Edited only</option><option value="featured">Featured only</option><option value="required">Required reading only</option><option value="advisor">CamTech Advisor only</option></select>
+            <option value="all">All books</option><option value="codeonly">Number / code-only titles</option><option value="edited">Edited only</option><option value="featured">Featured only</option><option value="required">Required reading only</option><option value="advisor">CamTech Advisor only</option></select>
         </div>
         <p className="text-[11px] text-slate-500">{list.length} book(s)</p>
         <div className="overflow-x-auto">

@@ -402,6 +402,29 @@ export default async function handler(req, res) {
       return res.json({ meta: Object.keys(clean).length ? clean : null });
     }
 
+    if (action === 'bulkSetMeta') {
+      if (!admin) return fail(403, 'Admins only.');
+      const updates = Array.isArray(body.updates) ? body.updates.slice(0, 100) : [];
+      if (!updates.length) return res.json({ saved: 0, meta: {} });
+      const ids = updates.map((u) => str(u.bookId, 100)).filter(Boolean);
+      const existingRaw = await redis('HMGET', 'meta', ...ids);
+      const cmds = [];
+      const savedMeta = {};
+      updates.forEach((u, idx) => {
+        const id = str(u.bookId, 100);
+        const title = str(u.title, 200);
+        if (!id || !title) return;
+        let prev = {};
+        try { if (existingRaw[idx]) prev = JSON.parse(existingRaw[idx]); } catch {}
+        const next = { ...prev, title };
+        if (str(u.author, 120) && !next.author) next.author = str(u.author, 120);
+        savedMeta[id] = next;
+        cmds.push(['HSET', 'meta', id, JSON.stringify(next)]);
+      });
+      if (cmds.length) await pipeline(cmds);
+      return res.json({ saved: cmds.length, meta: savedMeta });
+    }
+
     // ----- category list (add / rename / remove / reorder) -----
     // list = categories shown as buttons, in order. alias = old name -> current name (a renamed or removed category),
     // so books keep following their category without rewriting every book.

@@ -22,6 +22,17 @@ const DEFAULT_CATS = ['Computer Science', 'AI & Data Science', 'Engineering', 'B
 const ADMIN_TABS = ['admin', 'analytics', 'manager', 'upload', 'drive'];
 const GOOGLE_CLIENT_ID = import.meta.env?.VITE_GOOGLE_CLIENT_ID || '';
 const ADVISOR_FOLDER = (import.meta.env?.VITE_ADVISOR_FOLDER_NAME || 'CamTech Advisor').trim();   // folder inside the library folder: one sub-folder per professor
+const cleanDriveTitle = (rawFileName) => {
+  let base = String(rawFileName || '').replace(/\.(pdf|epub)$/i, '').trim();
+  const original = base.replace(/[_.-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  base = base.replace(/^10[\.\s_-]\d{4,5}[/\.\s_-][\d\.\s_-]+/i, '');
+  base = base.replace(/^[\[\(]?(?:978|979)[\s_-]*\d[\d\s_-]{8,16}[\]\)]?[\s._:-]+/i, '');
+  base = base.replace(/^(?:isbn|doi|id|book|doc|code|no)[\s._:-]*[\dXx-]{3,}[\s._:-]+/i, '');
+  base = base.replace(/^[\[\(]?\d{5,}[\]\)]?[\s._:-]+/, '');
+  base = base.replace(/^[\[\(]\d{1,6}[\]\)]\s*/, '');
+  const cleaned = base.replace(/[_.-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return /[a-zA-Z]{2,}/.test(cleaned) ? cleaned : original;
+};
 const guessCategory = (n) => {
   if (/\bai\b|data|python|neural|machine|learning/.test(n)) return 'AI & Data Science';
   if (/code|cyber|program|system|software|network|computer/.test(n)) return 'Computer Science';
@@ -246,7 +257,7 @@ export default function App() {
               const category = guessCategory(n);
               all.push({
                 id: f.id, driveFileId: f.id,
-                title: f.name.replace(/\.(pdf|epub)$/i, '').replace(/[_.-]+/g, ' ').trim(),
+                title: cleanDriveTitle(f.name), rawFileName: f.name,
                 author: 'CamTech Academic Press', category, zone: cur.zone, folderProf: cur.zone === 'advisor' ? (cur.prof || 'Unassigned') : '', format: isPdf ? 'PDF' : isEpub ? 'EPUB' : 'DOC',
                 fileSize: f.size ? (Number(f.size) / 1048576).toFixed(1) + ' MB' : '',
                 thumbnail: f.thumbnailLink ? f.thumbnailLink.replace(/=s\d+$/, '=s600') : '',
