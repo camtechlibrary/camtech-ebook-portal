@@ -73,7 +73,7 @@ export function BookEditor({ book, categories, cohorts, professors = [], api, on
   );
 }
 
-export default function CatalogManager({ books, categories, cohorts, professors = [], api, onSaved, flash }) {
+export default function CatalogManager({ books, categories, cohorts, professors = [], onEditCategories, api, onSaved, flash }) {
   const [q, setQ] = useState('');
   const [cat, setCat] = useState('All');
   const [flag, setFlag] = useState('all');
@@ -97,6 +97,7 @@ export default function CatalogManager({ books, categories, cohorts, professors 
       <div>
         <h2 className="text-2xl font-bold text-slate-100 font-serif flex items-center gap-2"><Pencil className="w-6 h-6 text-amber-400" /> Catalog Manager</h2>
         <p className="text-slate-400 text-sm">Fix titles, authors and categories, add tags, pin featured books and mark course-required reading — no need to re-upload to Google Drive.</p>
+        {onEditCategories && <button onClick={onEditCategories} className="mt-3 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-100 text-xs font-semibold inline-flex items-center gap-1.5"><Tag className="w-3.5 h-3.5 text-amber-400" /> Add / rename / remove categories</button>}
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 max-w-3xl">
         {[['Edited', counts.edited, 'text-amber-400'], ['Featured', counts.featured, 'text-amber-400'], ['Required reading', counts.required, 'text-blue-400'], ['CamTech Advisor', counts.advisor, 'text-amber-400']].map(([l, v, c]) => (

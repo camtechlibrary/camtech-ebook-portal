@@ -4,6 +4,7 @@ import AdminAnalytics from './AdminAnalytics.jsx';
 import CatalogManager, { BookEditor } from './CatalogManager.jsx';
 import SyncPanel from './SyncPanel.jsx';
 import UploadBooks from './UploadBooks.jsx';
+import CategoryManager from './CategoryManager.jsx';
 import {
   BookOpen, Search, CheckCircle, Clock, Shield, Grid, List, RefreshCw, Users, Eye,
   LogOut, X, ChevronLeft, Check, Sparkles, HardDrive, BookMarked, AlertCircle,
@@ -140,6 +141,8 @@ export default function App() {
   const [scanInfo, setScanInfo] = useState({ errors: [], skipped: [], at: 0 });
   const [syncStamp, setSyncStamp] = useState(0);
   const [editBook, setEditBook] = useState(null);
+  const [catConfig, setCatConfig] = useState({ list: DEFAULT_CATS, alias: {} });   // category buttons (editable by admins)
+  const [catModal, setCatModal] = useState(false);
   const [quick, setQuick] = useState('all');                  // all | featured | required
   const [cohortInput, setCohortInput] = useState('');
   const [formCohort, setFormCohort] = useState('');
@@ -158,21 +161,24 @@ export default function App() {
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
   // Drive books + staff edits = what everyone sees
+  const resolveCat = (name) => { let n = name, i = 0; while (catConfig.alias[n] && i++ < 8) n = catConfig.alias[n]; return n; };
   const books = useMemo(() => rawBooks.map((b) => {
     const m = meta[b.id];
-    const orig = { title: b.title, author: b.author, category: b.category };
+    const orig = { title: b.title, author: b.author, category: resolveCat(b.category) };
     const metaAdvisors = m?.advisors || [];
     const advisors = [...new Set([...(b.folderProf ? [b.folderProf] : []), ...metaAdvisors])];
-    if (!m) return { ...b, orig, tags: [], featured: false, required: [], advisors, metaAdvisors, edited: false };
-    return { ...b, orig, title: m.title || b.title, author: m.author || b.author, category: m.category || b.category, tags: m.tags || [], featured: !!m.featured, required: m.required || [], advisors, metaAdvisors, edited: true };
-  }), [rawBooks, meta]);
+    if (!m) return { ...b, category: orig.category, orig, tags: [], featured: false, required: [], advisors, metaAdvisors, edited: false };
+    return { ...b, orig, title: m.title || b.title, author: m.author || b.author, category: resolveCat(m.category || b.category), tags: m.tags || [], featured: !!m.featured, required: m.required || [], advisors, metaAdvisors, edited: true };
+  }), [rawBooks, meta, catConfig]);
   const allCats = useMemo(() => {
-    const extra = [...new Set(books.map((b) => b.category))].filter((c) => !DEFAULT_CATS.includes(c)).sort();
-    return [...DEFAULT_CATS, ...extra];
-  }, [books]);
+    const extra = [...new Set(books.map((b) => b.category))].filter((c) => !catConfig.list.includes(c)).sort();
+    return [...catConfig.list, ...extra];
+  }, [books, catConfig]);
   const professors = useMemo(() => [...new Set(books.flatMap((b) => b.advisors || []))].sort((a, b) => a.localeCompare(b)), [books]);
   const collCounts = useMemo(() => ({ all: books.length, stem: books.filter((b) => b.zone !== 'advisor').length, advisor: books.filter((b) => (b.advisors || []).length > 0).length }), [books]);
   const knownCohorts = useMemo(() => [...new Set(books.flatMap((b) => b.required || []))].filter((c) => c !== 'ALL').sort(), [books]);
+  useEffect(() => { if (selectedCategory !== 'All' && !allCats.includes(selectedCategory)) setSelectedCategory('All'); }, [allCats, selectedCategory]);
+  const saveCategories = async (config) => { const d = await api('setCategories', config); setCatConfig(d.config); flash('Categories saved.'); };
   const saveMeta = (id, m) => setMeta((prev) => { const n = { ...prev }; if (m) n[id] = m; else delete n[id]; return n; });
 
   // ---------- reader + timer ----------
@@ -194,7 +200,7 @@ export default function App() {
 
   const loadInit = useCallback(async () => {
     const d = await api('init');
-    setUser(d.user); setViews(d.views); setProgress(d.progress); setBoard(d.leaderboard); setMeta(d.meta || {});
+    setUser(d.user); setViews(d.views); setProgress(d.progress); setBoard(d.leaderboard); setMeta(d.meta || {}); setCatConfig(d.categories && d.categories.list ? d.categories : { list: DEFAULT_CATS, alias: {} });
   }, []);
 
   useEffect(() => {
@@ -640,6 +646,7 @@ export default function App() {
                       className={`px-4 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${active ? 'bg-amber-500 text-[#020617] shadow-md shadow-amber-500/20' : 'bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-100 hover:bg-slate-800'}`}>{cat}</button>
                   );
                 })}
+                {isAdmin && collection === 'all' && <button onClick={() => setCatModal(true)} title="Add, rename or remove categories" className="px-3 py-2 rounded-xl text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 border border-dashed border-amber-500/50 text-amber-400 hover:bg-amber-500/10"><Pencil className="w-3.5 h-3.5" /> Edit categories</button>}
               </div>
               <div className="flex items-center gap-4">
                 <span className="text-xs text-slate-400">Showing <strong className="text-slate-100">{filteredBooks.length}</strong> books</span>
@@ -864,13 +871,13 @@ export default function App() {
           <div className="space-y-6"><AdminNav /><AdminAnalytics api={api} books={books} flash={flash} /></div>
         )}
         {isAdmin && activeTab === 'manager' && (
-          <div className="space-y-6"><AdminNav /><CatalogManager books={books} categories={allCats} cohorts={knownCohorts} professors={professors} api={api} flash={flash} onSaved={saveMeta} /></div>
+          <div className="space-y-6"><AdminNav /><CatalogManager books={books} categories={allCats} cohorts={knownCohorts} professors={professors} onEditCategories={() => setCatModal(true)} api={api} flash={flash} onSaved={saveMeta} /></div>
         )}
 
         {isAdmin && activeTab === 'upload' && (
           <div className="space-y-6"><AdminNav />
             <UploadBooks clientId={GOOGLE_CLIENT_ID} rootFolderId={FOLDER_ID} advisorFolderName={ADVISOR_FOLDER} driveKey={DRIVE_KEY} userEmail={user.email}
-              books={books} categories={allCats} professors={professors} cohorts={knownCohorts} guessCategory={guessCategory} api={api} flash={flash}
+              books={books} categories={allCats} professors={professors} cohorts={knownCohorts} guessCategory={(n) => resolveCat(guessCategory(n))} api={api} flash={flash}
               onDone={() => { loadCatalog(); loadInit().catch(() => {}); }} /></div>
         )}
 
@@ -984,6 +991,7 @@ export default function App() {
         </div>
       )}
 
+      {isAdmin && catModal && <CategoryManager config={catConfig} books={books} onSave={saveCategories} onClose={() => setCatModal(false)} />}
       {isAdmin && editBook && <BookEditor book={editBook} categories={allCats} cohorts={knownCohorts} professors={professors} api={api} onClose={() => setEditBook(null)} onSaved={(id, m) => { saveMeta(id, m); flash('Book details saved.'); }} />}
 
       {/* CHANGE PASSWORD (forced after an admin reset) */}

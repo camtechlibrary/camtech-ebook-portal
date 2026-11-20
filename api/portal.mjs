@@ -166,12 +166,13 @@ export default async function handler(req, res) {
     const bookIdOf = () => String(body.bookId || '').slice(0, 100);
 
     if (action === 'init') {
-      const [views, prog, lb, metaRaw] = await Promise.all([hgetall('views'), hgetall(`progress:${me}`), leaderboard(me, admin), hgetall('meta')]);
+      const [views, prog, lb, metaRaw, catRaw] = await Promise.all([hgetall('views'), hgetall(`progress:${me}`), leaderboard(me, admin), hgetall('meta'), redis('HGET', 'settings', 'categories')]);
       const progress = {}, viewsNum = {}, meta = {};
       for (const [k, v] of Object.entries(metaRaw)) { try { meta[k] = JSON.parse(v); } catch {} }
       for (const [k, v] of Object.entries(prog)) progress[k] = JSON.parse(v);
       for (const [k, v] of Object.entries(views)) viewsNum[k] = Number(v);
-      return res.json({ user: publicUser(user), views: viewsNum, progress, leaderboard: lb, meta });
+      let categories = null; try { categories = catRaw ? JSON.parse(catRaw) : null; } catch {}
+      return res.json({ user: publicUser(user), views: viewsNum, progress, leaderboard: lb, meta, categories });
     }
 
     if (action === 'open') {
@@ -399,6 +400,25 @@ export default async function handler(req, res) {
       else await redis('HDEL', 'meta', bookId);
       await log(me, 'Edited catalogue details', str(body.title, 120) || bookId);
       return res.json({ meta: Object.keys(clean).length ? clean : null });
+    }
+
+    // ----- category list (add / rename / remove / reorder) -----
+    // list = categories shown as buttons, in order. alias = old name -> current name (a renamed or removed category),
+    // so books keep following their category without rewriting every book.
+    if (action === 'setCategories') {
+      if (!admin) return fail(403, 'Admins only.');
+      const seen = new Set(), list = [];
+      (Array.isArray(body.list) ? body.list : []).forEach((x) => { const n = str(x, 40); if (n && !seen.has(n.toLowerCase())) { seen.add(n.toLowerCase()); list.push(n); } });
+      if (!list.length) return fail(400, 'Keep at least one category.');
+      if (list.length > 40) return fail(400, 'At most 40 categories.');
+      const alias = {};
+      Object.entries(body.alias && typeof body.alias === 'object' ? body.alias : {}).slice(0, 500).forEach(([k, v]) => {
+        const from = str(k, 40), to = str(v, 40);
+        if (from && to && from.toLowerCase() !== to.toLowerCase()) alias[from] = to;
+      });
+      await redis('HSET', 'settings', 'categories', JSON.stringify({ list, alias }));
+      await log(me, 'Edited categories', list.join(', ').slice(0, 120));
+      return res.json({ config: { list, alias } });
     }
 
     // ----- quiz rating (0-10) by library staff, used for "average quiz score" -----

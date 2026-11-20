@@ -44,3 +44,7 @@ Covers: Admin -> Drive Sync -> "Generate missing covers" makes covers for books 
   - Books are listed most-viewed first (featured / required-for-you books are pinned above that).
 - **Drive layout:** `<library folder>/CamTech Advisor/<Professor name>/book.pdf`. The folder name can be changed with VITE_ADVISOR_FOLDER_NAME.
 - **Admin -> Upload Books:** uploads PDF/EPUB straight from the browser into Google Drive (STEM Resources, or CamTech Advisor > professor). One-time setup: create a Google OAuth *Web* client ID, add the site address under Authorized JavaScript origins, set VITE_GOOGLE_CLIENT_ID in Vercel. The admin who uploads signs in with Google and needs Editor access to the library folder.
+
+## Categories (admin)
+Catalog -> "Edit categories" (or Admin -> Catalog Manager -> "Add / rename / remove categories"): add, rename, reorder and remove the category buttons.
+Renaming or removing keeps every book following its category (removed categories move their books to the one you choose). The list is saved in Redis (settings:categories).
