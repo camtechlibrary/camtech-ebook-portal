@@ -26,17 +26,11 @@ const ADVISOR_FOLDER = (import.meta.env?.VITE_ADVISOR_FOLDER_NAME || 'CamTech Ad
 const cleanDriveTitle = (rawFileName) => {
   let base = String(rawFileName || '').replace(/\.(pdf|epub)$/i, '').trim();
   const original = base.replace(/[_.-]+/g, ' ').replace(/\s+/g, ' ').trim();
-  // Strip leading DOI prefix when followed by title text
   base = base.replace(/^10[\.\s_-]\d{4,9}[%\/\.\s_-]+[\d%\/\.\s_-]+(?=\S)/i, '');
-  // Strip leading ISBN-13 (978/979...) followed by separator and remaining title
   base = base.replace(/^[\[\(]?(?:978|979)[\s_-]*\d[\d\s_-]{8,16}[\]\)]?[\s._:-]+(?=\S)/i, '');
-  // Strip explicit code/id labels (e.g. ISBN_1234_Title, ID-123-Title)
   base = base.replace(/^(?:isbn|doi|id|book|doc|code|no)[\s._:-]*[\dXx-]{3,}[\s._:-]+(?=\S)/i, '');
-  // Strip ONE OR MORE consecutive 5+ digit catalog/ID numbers at the start (e.g. "2167875895 10040 5G..." or "2167875895 10120 A Buddha...")
   base = base.replace(/^(?:[\[\(]?\d{5,}[\]\)]?[\s._:-]+)+(?=\S)/, '');
-  // Strip leading-zero 3-4 digit codes (e.g. "0123 Title") without touching 100, 1000, 1984, 2020, 2050
   base = base.replace(/^(?:0\d{2,4}[\s._:-]+)+(?=[a-zA-Z])/, '');
-  // Strip bracketed numbers [123] Title
   base = base.replace(/^(?:[\[\(]\d{1,6}[\]\)]\s*)+(?=\S)/, '');
   const cleaned = base.replace(/[_.-]+/g, ' ').replace(/\s+/g, ' ').trim();
   return /[a-zA-Z]/.test(cleaned) ? cleaned : original;
@@ -183,7 +177,7 @@ export default function App() {
   const resolveCat = (name) => { let n = name, i = 0; while (catConfig.alias[n] && i++ < 8) n = catConfig.alias[n]; return n; };
   const books = useMemo(() => rawBooks.map((b) => {
     const m = meta[b.id];
-    const orig = { title: b.title, author: b.author, category: resolveCat(b.category) };
+    const orig = { title: b.title, author: b.author === '' ? '' : b.author, category: resolveCat(b.category) };
     const metaAdvisors = m?.advisors || [];
     const advisors = [...new Set([...(b.folderProf ? [b.folderProf] : []), ...metaAdvisors])];
     if (!m) return { ...b, category: orig.category, orig, tags: [], featured: false, required: [], advisors, metaAdvisors, edited: false };
